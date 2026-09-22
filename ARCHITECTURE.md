@@ -334,6 +334,7 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 - 会话**追加**消息后，已分析过的批次**不重算**（`batch_index=0` 永远是原来那 50 条），只分析新出现的**尾批**。
 - 推论（已知且接受）：不足 50 条的**余数批**会随追加「原地长大」（如 60 → 80 条时报 `batch_index=1` 已存在 → 跳过），该批 `message_id_to` 与样本量停留在首次分析时的快照；历史 `analyses` 行不因此改写。
 - 理由：维持 `analyses` / `evidence` 与历史 `profile_versions` 的**只增不改**语义——重算会让旧版本快照所引用的结论失去对应批次。
+- **T-006 UI 约定（2026-09-22 拍板，维持「原地长大」现状）：** 前端顶部必须常显「当前覆盖消息数」（`snapshot_json.message_count`）与「最新画像版本号」（`snapshot.version`），使用户能看出追加的消息尚未进入画像——不重算、不自动补批次。
 
 **仍待人工确认：** `conversation_id` 由谁分配（当前由调用方传入字符串；`POST /conversations` 未实现，属 T-007/T-008）。
 
@@ -387,3 +388,4 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 | 0.2 | 2026-09-22 | Python 基线改为 3.12.4（与实测 venv 一致）；message_id 冻结为方案 A（uuid5） |
 | 0.3 | 2026-09-22 | 拍板落地：person_id 生成方式冻结（§4.1）；conversations 建表（§4.2）；区分「解析错误行」与「message_id 冲突」两条策略（§6）；response_format / 重试 / 超时确认（§8）；脱敏范围不扩展（§8）；补 §4.5 speaker_role 读法 |
 | 0.4 | 2026-09-22 | T-005 轮拍板冻结：§4.5 取消「需人工确认」——`speaker_role` 对 `dyad.*` 恒记真实说话人；§6 批次幂等键 = `batch_index`、追加消息后不重算既有批次、只分析新增尾批；§8 证据不合法保持「降级为丢弃 + 记录」 |
+| 0.5 | 2026-09-22 | T-006 轮拍板：余数批「原地长大」维持现状；新增 UI 约定——前端顶部常显当前覆盖消息数与最新画像版本号（§6） |

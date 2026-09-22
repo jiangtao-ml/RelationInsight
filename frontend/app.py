@@ -1,0 +1,452 @@
+"""T-006 Streamlit 前端原型：文本导入 / A-B 标记 / 行为倾向卡片 / 证据列表。
+
+设计约束（TASKS.md T-006）
+--------------------------
+1. **不启动 FastAPI 也能演示**：③ 画像卡片、④ 证据列表读 `frontend/fixtures/mock_profile.json`；
+   ① 导入预览、② A/B 标记只用本进程内存里的示例文本 + `backend/parser.py`（纯函数，不碰数据库）。
+2. 证据行展示 `message_id` + **脱敏后** quote（策略 α，见 `ARCHITECTURE.md` §4.5）。
+3. 顶部有同意勾选框：原型阶段只存本地 session state；联调勾选后写入 `consents`（T-007）。
+4. **不做诊断式标题**：全部文案为「行为倾向 / 可能与相处模式有关」，不出现人格标签、不做心理诊断、
+   不提供操控或读心建议。
+
+运行
+----
+    cd C:\\Users\\17352\\Desktop\\RelationInsight
+    backend\\.venv\\Scripts\\python.exe -m streamlit run frontend/app.py
+
+本页不写数据库、不调用模型：真正的分析与写库在 T-004/T-005，接线属 T-008。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import uuid
+from pathlib import Path
+from typing import Any, Mapping
+
+import streamlit as st
+
+st.set_page_config(page_title="关系洞察 · 原型（非诊断）", layout="wide")
+
+FRONTEND_DIR = Path(__file__).resolve().parent
+REPO_ROOT = FRONTEND_DIR.parent
+BACKEND_DIR = REPO_ROOT / "backend"
+FIXTURE_PATH = FRONTEND_DIR / "fixtures" / "mock_profile.json"
+DEFAULT_CONVERSATION_ID = "conv-demo-0001"
+
+#: 左侧预览用示例文本（演示 ① ② 两块）：63 条可解析消息 + 3 个空行 + 4 个错误行。
+#: 内容纯属虚构；手机号 / 邮箱 / 银行卡号是占位样例，仅用于演示策略 α 脱敏。
+DEMO_TEXT = """A: 周三的事我们再确认一下吧。
+B: 好，你说。
+A: 我这边下午三点之后都有空。
+A: 周四下午我们直接去那家店，你到时候过来就行。
+B: 三点吗？我可能要晚十分钟。
+A: 可以，别迟到太多。
+B: 好。
+B: 上次也是因为我路上堵车，才晚了一会儿。
+A: 嗯，那这次提前出门。
+B: 行。
+
+A: 还有件事，周末你爸妈那边要不要一起吃饭。
+B: 我还没问他们，晚点回你。
+A: 好，你尽快。
+B: 我尽量。
+A: 你每次都这样说。
+B: 我确实需要先问过他们。
+A: 我知道，但是时间要定下来。
+B: 那我今天晚上就打电话。
+A: 最好是这样，不然又要拖到下周。
+B: 嗯。
+
+A: 上次说好一起去看展，最后也没去成。
+B: 那次是临时加班。
+A: 我没说你故意，只是觉得计划总是变。
+B: 我理解你的感受。
+A: 你先按我说的做，别的地方不用改。
+B: 好，我尽量配合。
+A: 周五之前给我答复。
+B: 我记下了。
+A: 我手机换号了，新号是 13812345678。
+B: 我存一下。
+A:我明白了
+（撤回了一条消息）
+A: 邮箱也换了，现在用 demo.user@example.com。
+B: 收到了，我晚点回你确认。
+B: 不会。
+A: 别又忘了。
+A: 你最近回复消息都很慢。
+B: 工作比较忙。
+A: 忙到什么程度？
+B: 每天加班到九点多。
+A: 那你还有精力回别人消息吗？
+B: 你的消息我都会回，只是慢一点。
+C: 这是笔误
+A: 嗯，我知道。
+B: 那就好。
+A: 不用问了，我已经定好了。
+B: 那行，我听你的。
+A: 报销单我填一下，卡号是 6222021234567890123。
+B: 这个别发在聊天里。
+A: 我知道了，下次注意。
+B: 嗯。
+A: 这个周末你有安排吗？
+B: 暂时没有。
+
+A: 那去看展吧，上次没去成。
+B: 好，这次尽量去。
+A: 别尽量，直接定下来。
+B: 好，定周六下午。
+A: 两点，我买票。
+B: 好，我到时候找你。
+A: 别再临时改。
+B: 不会改了。
+A: 上次也是这么说的。
+B: 这次真的不会。
+A: 
+A: 那我们看情况。
+B: 好。
+A: 我先去忙了，晚上再说。
+"""
+
+# 复用后端实现（只导入纯函数）：不启动 FastAPI，也不读写数据库。
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+try:
+    from parser import parse_chat
+
+    PARSER_SOURCE = "backend/parser.py（T-002）"
+except ImportError as exc:  # pragma: no cover - 仅环境不完整时触发
+    st.error(f"无法导入 `backend/parser.py`：{exc}")
+    st.stop()
+
+try:
+    from pipeline import QUOTE_MAX_CHARS, snapshot_to_sections
+
+    PIPELINE_SOURCE = "backend/pipeline/merge.py（`snapshot_to_sections()`，T-005）"
+except ImportError as exc:  # pragma: no cover - 仅环境不完整时触发
+    st.error(
+        f"无法导入 `backend/pipeline`：{exc}\n\n请用仓库自带虚拟环境运行："
+        "`backend\\.venv\\Scripts\\python.exe -m streamlit run frontend/app.py`"
+    )
+    st.stop()
+
+# ------------------------------------------------------------------ 工具函数
+
+
+@st.cache_data(show_spinner=False)
+def load_snapshot() -> dict[str, Any]:
+    """读入演示画像（`frontend/fixtures/mock_profile.json`，符合 `ARCHITECTURE.md` §5 快照结构）。"""
+    return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def person_id_for(conversation_id: str, role: str) -> str:
+    """`ARCHITECTURE.md` §4.1 冻结的 `person_id` 算法（本页只用于展示，不写库）。"""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"person:{conversation_id}:{role}"))
+
+
+def role_from_person_id(conversation_id: str, person_id: str) -> str:
+    for role in ("A", "B"):
+        if person_id == person_id_for(conversation_id, role):
+            return role
+    return "?"
+
+
+CHANGE_LABELS = {
+    "added": "新增",
+    "supported": "被支持",
+    "weakened": "被削弱",
+    "revised": "被修订",
+}
+
+
+def change_label(entry: Mapping[str, Any]) -> str:
+    kind = str(entry.get("change_kind") or "")
+    return CHANGE_LABELS.get(kind, kind or "—")
+
+
+def render_trait_card(entry: Mapping[str, Any]) -> None:
+    """一张结论卡片：statement + confidence + sample_size（验收 ③/④）。"""
+    with st.container(border=True):
+        superseded = entry.get("status") == "superseded"
+        head = f"`{entry.get('trait_key')}`"
+        if superseded:
+            head += f" · 历史条目（已在 v{entry.get('superseded_at_version')} 被修订）"
+        st.markdown(head)
+        st.markdown(f"**{entry.get('statement') or '（无表述）'}**")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("confidence", f"{float(entry.get('confidence') or 0.0):.2f}")
+        m2.metric("sample_size", f"{int(entry.get('sample_size') or 0)}")
+        m3.metric("support_count", f"{int(entry.get('support_count') or 0)}")
+        revision_of = entry.get("revision_of")
+        bits = [
+            f"变更类型：{change_label(entry)}",
+            f"首次出现：v{entry.get('first_version')}",
+            f"最近更新：v{entry.get('last_updated_version')}",
+            f"证据数：{len(entry.get('evidence_message_ids') or [])}",
+        ]
+        if isinstance(revision_of, Mapping):
+            bits.append(f"修订自：{revision_of.get('entry_key')}（v{revision_of.get('version')}）")
+        if superseded:
+            bits.append(f"被 {entry.get('superseded_by')} 取代")
+        st.caption(" · ".join(bits))
+        st.caption(f"entry_key：`{entry.get('entry_key')}`（同一 trait_key 的历史条目不会被覆盖，见 §4.6）")
+
+
+# ------------------------------------------------------------------ 左侧栏
+
+if "chat_text" not in st.session_state:
+    st.session_state["chat_text"] = DEMO_TEXT
+
+with st.sidebar:
+    st.header("文本导入")
+    st.caption("格式：`A: 正文` / `B: 正文`（大写 A/B + 英文冒号 + **恰好一个空格**）")
+    conversation_id = st.text_input("会话 ID（conversation_id）", value=DEFAULT_CONVERSATION_ID)
+    btn_fill, btn_clear = st.columns(2)
+    if btn_fill.button("填入示例文本"):
+        st.session_state["chat_text"] = DEMO_TEXT
+        st.rerun()
+    if btn_clear.button("清空"):
+        st.session_state["chat_text"] = ""
+        st.rerun()
+
+    chat_text = st.text_area(
+        "聊天文本", height=340, key="chat_text", label_visibility="collapsed"
+    )
+    show_superseded = st.checkbox("（③）显示已被修订的历史条目", value=False)
+    st.divider()
+    st.caption(f"解析：`{PARSER_SOURCE}`")
+    st.caption(f"卡片切分：`{PIPELINE_SOURCE}`，quote 截断上限 {QUOTE_MAX_CHARS} 字符")
+    with st.expander("隐私与边界（PRIVACY.md 摘要）"):
+        st.markdown(
+            "- 只处理你主动粘贴的文本；数据默认只存本机 SQLite。\n"
+            "- 调用模型前对手机号 / 邮箱 / 身份证号 / 银行卡号做正则脱敏（策略 α）。\n"
+            "- 日志只记 `message_id` 与条数，不记聊天原文。\n"
+            "- 可一键删除会话数据（T-007）。"
+        )
+
+# ------------------------------------------------------------------ 顶部：覆盖数 / 版本号 / 同意勾选
+
+snapshot = load_snapshot()
+show_all = bool(show_superseded)
+sections = snapshot_to_sections(snapshot, include_superseded=show_all)
+all_traits = [t for t in (snapshot.get("traits") or []) if isinstance(t, Mapping)]
+visible_traits = (
+    all_traits
+    if show_all
+    else [t for t in all_traits if t.get("status") != "superseded"]
+)
+
+st.title("关系洞察 · 行为倾向归纳（原型）")
+st.caption(
+    "本页只呈现**可观察到的行为倾向**与对应原文证据；不做心理诊断、不给人格标签、不推测对方想法、"
+    "不提供操控建议。"
+)
+
+top1, top2, top3 = st.columns([1, 1, 2])
+top1.metric("当前覆盖消息数", f"{int(snapshot.get('message_count') or 0)} 条")
+top2.metric("最新画像版本号", f"v{snapshot.get('version', '?')}")
+top3.metric("画像生成时间（演示数据）", str(snapshot.get("generated_at") or "—"))
+
+st.caption(
+    "⚠️ 「覆盖消息数」= **已经进入画像**的消息条数，不等于你导入的全部消息："
+    "不足 50 条的余数批在首次分析时即固定切片，之后追加的消息不会自动并入，也不会触发重算"
+    "（`ARCHITECTURE.md` §6）。所以继续粘贴新消息时，这个数字会先**停住**，直到出现新的整批。"
+)
+st.info(
+    f"数据来源：① ② 用左侧示例文本在内存里实时解析（会话 `{conversation_id}`）；"
+    f"③ ④ 读 `frontend/fixtures/mock_profile.json`（演示会话 `{snapshot.get('conversation_id')}`，"
+    f"v{snapshot.get('version')}）。两处都不写数据库。"
+)
+
+consent_left, consent_right = st.columns([3, 2])
+with consent_left:
+    consent_granted = st.checkbox(
+        "我已阅读并同意：只分析我主动提供的文本，用于**行为倾向归纳**（非诊断、非操控建议）",
+        key="consent_granted",
+    )
+with consent_right:
+    if consent_granted:
+        st.success("已勾选同意（原型：只存本地 session state）。")
+    else:
+        st.warning("未勾选同意：联调阶段（T-007/T-008）不得调用分析管道、不得写 `consents`。")
+st.caption(
+    "同意落地路径：勾选 → `POST /conversations/{id}/consent` → `consents(granted=1)`（属 T-007；本页只演示勾选框）"
+)
+
+# ------------------------------------------------------------------ 解析（内存，不写库）
+
+result = parse_chat(chat_text, conversation_id)
+seq_by_message_id = {message.message_id: message.seq for message in result.messages}
+message_rows: list[dict[str, Any]] = []
+for message in result.messages:
+    role = role_from_person_id(conversation_id, message.person_id)
+    message_rows.append(
+        {
+            "seq": message.seq,
+            "源行号": message.source_line,
+            "说话人": role,
+            "message_id": message.message_id,
+            "person_id": message.person_id,
+            "正文": message.body,
+        }
+    )
+
+tab1, tab2, tab3, tab4 = st.tabs(["① 导入预览", "② A/B 标记", "③ 画像卡片", "④ 证据列表"])
+# ------------------------------------------------------------------ ① 导入预览
+
+with tab1:
+    c1, c2, c3 = st.columns(3)
+    c1.metric("可解析消息", f"{len(result.messages)} 条")
+    c2.metric("错误行", f"{len(result.errors)} 行")
+    c3.metric("空行跳过", f"{result.blank_lines_skipped} 行")
+    st.caption("`seq` 只对**可解析成功**的行从 0 递增（§6）；空行跳过且不计入错误行。")
+    if message_rows:
+        st.dataframe(message_rows, hide_index=True)
+    else:
+        st.info("左侧还没有可解析的消息。格式：`A: 正文` / `B: 正文`。")
+    st.subheader("错误行列表")
+    if result.errors:
+        st.dataframe(
+            [
+                {"行号": error.line_number, "原始行": error.raw_line, "原因": error.reason}
+                for error in result.errors
+            ],
+            hide_index=True,
+        )
+        st.caption("按 T-002 策略：**可解析的行照常导入 + 列出错误行**（只有 `message_id` 冲突才拒绝整批，见 §6）。")
+    else:
+        st.success("没有错误行：全部可解析。")
+
+# ------------------------------------------------------------------ ② A/B 标记
+
+with tab2:
+    st.caption(
+        "逐个确认说话人（另一种写法：把整段文本当作 A 或 B 发出）。这里的改动只影响**本页展示**：`person_id` 与证据行的 "
+        "`speaker_role` 会跟着变；写库接口是 `PATCH /messages/{id}/speaker`（T-008 接线），本页不改数据库。"
+    )
+    if not result.messages:
+        st.session_state["speaker_overrides"] = {}
+        st.info("左侧还没有可解析的消息。")
+    else:
+        original_roles = {row["seq"]: row["说话人"] for row in message_rows}
+        overrides: dict[int, str] = {}
+        with st.container(height=460, border=True):
+            for row in message_rows:
+                seq = int(row["seq"])
+                col_left, col_mid, col_right = st.columns([2, 6, 1])
+                col_left.caption(f"seq {seq} · 行 {row['源行号']}")
+                col_left.caption(f"`{row['message_id']}`")
+                col_mid.markdown(row["正文"])
+                picked = col_right.selectbox(
+                    "说话人",
+                    options=["A", "B"],
+                    index=0 if row["说话人"] == "A" else 1,
+                    key=f"speaker_{row['message_id']}",
+                    label_visibility="collapsed",
+                )
+                if picked != original_roles.get(seq):
+                    overrides[seq] = str(picked)
+        st.session_state["speaker_overrides"] = overrides
+        if overrides:
+            st.warning(
+                f"已修改 {len(overrides)} 条消息的说话人："
+                + "、".join(f"seq {seq} → {role}" for seq, role in sorted(overrides.items()))
+            )
+            st.caption("③④ 的证据若命中这些 `message_id`，`speaker_role` 会同步显示为改后的说话人。")
+        else:
+            st.success("当前说话人与解析结果一致。")
+
+# ------------------------------------------------------------------ ③ 画像卡片
+
+with tab3:
+    st.caption(
+        "按 `snapshot_to_sections()` 分 A / B / dyad 三栏（归属取自 `trait_key` 前缀）；"
+        "每张卡片显示 statement、confidence、sample_size。"
+    )
+    col_a, col_b, col_c = st.columns(3)
+    for column, owner, title in (
+        (col_a, "A", "A 的行为倾向"),
+        (col_b, "B", "B 的行为倾向"),
+        (col_c, "dyad", "双方互动（dyad）"),
+    ):
+        with column:
+            st.subheader(title)
+            items = sections.get(owner) or []
+            if not items:
+                st.caption("暂无结论。")
+            for entry in items:
+                render_trait_card(entry)
+
+    for entry in sections.get("other") or []:
+        render_trait_card(entry)
+
+    counts = snapshot.get("counts") or {}
+    st.divider()
+    change_bits = [
+        f"{CHANGE_LABELS.get(key, key)} {counts[key]}"
+        for key in ("added", "supported", "weakened", "revised")
+        if key in counts
+    ]
+    st.caption(
+        "本版变更计数：" + " · ".join(change_bits)
+        + f" · 有效条目 {counts.get('active_traits', '—')}"
+        + f" · 历史条目 {counts.get('superseded_traits', '—')}"
+    )
+    for warning in snapshot.get("warnings") or []:
+        st.warning(str(warning))
+
+# ------------------------------------------------------------------ ④ 证据列表
+
+with tab4:
+    current_overrides = dict(st.session_state.get("speaker_overrides") or {})
+    st.caption(
+        "每条结论可展开：`message_id` + **脱敏后** quote + speaker_role（§4.5）。"
+        f"quote 为策略 α 脱敏后的前缀（最多 {QUOTE_MAX_CHARS} 字符）；要看完整原文，请用 `message_id` 回查 `messages.body`。"
+    )
+    if not visible_traits:
+        st.info("没有可展示的结论。")
+    for entry in visible_traits:
+        with st.expander(
+            f"{entry.get('trait_key')} — {entry.get('statement')}", expanded=False
+        ):
+            st.caption(
+                f"entry_key：`{entry.get('entry_key')}` · 状态：{entry.get('status')} · "
+                f"变更类型：{change_label(entry)} · "
+                f"confidence {float(entry.get('confidence') or 0.0):.2f} · "
+                f"sample_size {int(entry.get('sample_size') or 0)}"
+            )
+            evidence_rows: list[dict[str, Any]] = []
+            for item in entry.get("evidence") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                message_id = str(item.get("message_id") or "")
+                seq = seq_by_message_id.get(message_id)
+                role = item.get("speaker_role")
+                effective = current_overrides.get(seq, role) if seq is not None else role
+                note = "" if str(effective) == str(role) else f"（② 标记：由 {role} 改为 {effective}）"
+                evidence_rows.append(
+                    {
+                        "message_id": message_id,
+                        "seq": str(seq) if seq is not None else "—（不在当前示例文本中）",
+                        "quote（脱敏后）": item.get("quote") or "",
+                        "speaker_role": f"{effective or '—'}{note}",
+                    }
+                )
+            if evidence_rows:
+                st.dataframe(evidence_rows, hide_index=True)
+            else:
+                st.warning("该结论没有可用证据（T-004 规定：无证据的结论不入库）。")
+
+# ------------------------------------------------------------------ 免责声明
+
+st.divider()
+st.caption(
+    "**免责声明：**本原型只归纳**可观察到的行为倾向**并给出原文证据，**不是心理诊断、不是人格标签、"
+    "不推测对方动机或想法（不读心）、不提供操控或 PUA 建议**；结论可能出错，请以原文为准。"
+)
+st.caption(
+    "数据默认只存本机；调用模型前按策略 α 对手机号 / 邮箱 / 身份证号 / 银行卡号脱敏；"
+    "可一键删除会话数据（T-007）。后端联调（写库、同意落库、真实模型调用）属 T-008。"
+)

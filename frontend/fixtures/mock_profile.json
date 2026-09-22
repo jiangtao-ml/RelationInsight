@@ -1,0 +1,317 @@
+{
+  "schema_version": "1.0",
+  "conversation_id": "conv-demo-0001",
+  "version": 3,
+  "supersedes_version": 2,
+  "generated_at": "2026-09-22T09:30:00Z",
+  "message_count": 63,
+  "rules_version": "1.0",
+  "covered_analyses": [
+    "analysis:conv-demo-0001:0",
+    "analysis:conv-demo-0001:1"
+  ],
+  "covered_batch_indexes": [
+    0,
+    1
+  ],
+  "counts": {
+    "added": 1,
+    "supported": 3,
+    "weakened": 0,
+    "revised": 1,
+    "active_traits": 6,
+    "superseded_traits": 1,
+    "total_traits": 7
+  },
+  "traits": [
+    {
+      "trait_key": "A.request_style",
+      "entry_key": "A.request_style@v1",
+      "owner": "A",
+      "statement": "提出请求时倾向先给结论、再等对方配合，较少先询问对方的时间安排。",
+      "confidence": 0.68,
+      "sample_size": 9,
+      "evidence_message_ids": [
+        "63eaa5f5-88a1-5fcf-b59b-5cc079148549",
+        "c2ba6843-cfe4-581a-b795-8e345a600f02",
+        "cce7161d-7df8-5837-8805-f06d947a941a"
+      ],
+      "evidence": [
+        {
+          "message_id": "63eaa5f5-88a1-5fcf-b59b-5cc079148549",
+          "quote": "周四下午我们直接去那家店，你到时候过来就行。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "c2ba6843-cfe4-581a-b795-8e345a600f02",
+          "quote": "你先按我说的做，别的地方不用改。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "cce7161d-7df8-5837-8805-f06d947a941a",
+          "quote": "不用问了，我已经定好了。",
+          "speaker_role": "A"
+        }
+      ],
+      "support_count": 3,
+      "first_version": 1,
+      "last_updated_version": 3,
+      "status": "active",
+      "change_kind": "supported",
+      "sources": [
+        "analysis:conv-demo-0001:0",
+        "analysis:conv-demo-0001:1"
+      ],
+      "revision_of": null
+    },
+    {
+      "trait_key": "A.plan_focus",
+      "entry_key": "A.plan_focus@v1",
+      "owner": "A",
+      "statement": "多次把话题拉回时间与安排上，要求对方给出确定答复。",
+      "confidence": 0.74,
+      "sample_size": 12,
+      "evidence_message_ids": [
+        "7393d894-1f1d-583a-8017-4cec396038ce",
+        "2c267178-5502-527a-8b68-0be09fbec86f",
+        "0092ea39-0cfd-50d8-8308-0ad4cdec184e",
+        "d83e4dbb-c8cb-56c9-8747-dd5d2a490a29"
+      ],
+      "evidence": [
+        {
+          "message_id": "7393d894-1f1d-583a-8017-4cec396038ce",
+          "quote": "周三的事我们再确认一下吧。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "2c267178-5502-527a-8b68-0be09fbec86f",
+          "quote": "我知道，但是时间要定下来。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "0092ea39-0cfd-50d8-8308-0ad4cdec184e",
+          "quote": "周五之前给我答复。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "d83e4dbb-c8cb-56c9-8747-dd5d2a490a29",
+          "quote": "别再临时改。",
+          "speaker_role": "A"
+        }
+      ],
+      "support_count": 4,
+      "first_version": 1,
+      "last_updated_version": 3,
+      "status": "active",
+      "change_kind": "supported",
+      "sources": [
+        "analysis:conv-demo-0001:0",
+        "analysis:conv-demo-0001:1"
+      ],
+      "revision_of": null
+    },
+    {
+      "trait_key": "B.reply_style",
+      "entry_key": "B.reply_style@v1",
+      "owner": "B",
+      "statement": "回应偏简短，多用单句承接，较少主动展开话题。",
+      "confidence": 0.61,
+      "sample_size": 15,
+      "evidence_message_ids": [
+        "1ff14661-8da3-5960-875d-29bc6a570ab3",
+        "ee31b5ed-3d7f-5e9f-821b-cd04276e5c99",
+        "74dc3062-b9d5-5a41-b87c-cc0244a45e31",
+        "fa1d3678-a170-5bb6-90fa-989ce761a96f"
+      ],
+      "evidence": [
+        {
+          "message_id": "1ff14661-8da3-5960-875d-29bc6a570ab3",
+          "quote": "好。",
+          "speaker_role": "B"
+        },
+        {
+          "message_id": "ee31b5ed-3d7f-5e9f-821b-cd04276e5c99",
+          "quote": "嗯。",
+          "speaker_role": "B"
+        },
+        {
+          "message_id": "74dc3062-b9d5-5a41-b87c-cc0244a45e31",
+          "quote": "别又忘了。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "fa1d3678-a170-5bb6-90fa-989ce761a96f",
+          "quote": "嗯。",
+          "speaker_role": "B"
+        }
+      ],
+      "support_count": 4,
+      "first_version": 1,
+      "last_updated_version": 3,
+      "status": "active",
+      "change_kind": "supported",
+      "sources": [
+        "analysis:conv-demo-0001:0",
+        "analysis:conv-demo-0001:1"
+      ],
+      "revision_of": null
+    },
+    {
+      "trait_key": "dyad.conflict_repair",
+      "entry_key": "dyad.conflict_repair@v2",
+      "owner": "dyad",
+      "statement": "出现分歧后多由 B 先做简短让步或表示理解，A 随后仍坚持原安排。",
+      "confidence": 0.58,
+      "sample_size": 7,
+      "evidence_message_ids": [
+        "06af05a1-88f0-5120-a925-285cecb8526b",
+        "18edfa7d-c097-56ff-a793-72df1043ecba",
+        "c99b2922-d41e-537c-8a98-966f5d411623"
+      ],
+      "evidence": [
+        {
+          "message_id": "06af05a1-88f0-5120-a925-285cecb8526b",
+          "quote": "我理解你的感受。",
+          "speaker_role": "B"
+        },
+        {
+          "message_id": "18edfa7d-c097-56ff-a793-72df1043ecba",
+          "quote": "那行，我听你的。",
+          "speaker_role": "B"
+        },
+        {
+          "message_id": "c99b2922-d41e-537c-8a98-966f5d411623",
+          "quote": "别尽量，直接定下来。",
+          "speaker_role": "A"
+        }
+      ],
+      "support_count": 3,
+      "first_version": 2,
+      "last_updated_version": 2,
+      "status": "active",
+      "change_kind": "added",
+      "sources": [
+        "analysis:conv-demo-0001:0",
+        "analysis:conv-demo-0001:1"
+      ],
+      "revision_of": null
+    },
+    {
+      "trait_key": "dyad.practical_matters",
+      "entry_key": "dyad.practical_matters@v3",
+      "owner": "dyad",
+      "statement": "现实事务（换号、联络方式、报销等）多由 A 发起并快速推进。",
+      "confidence": 0.66,
+      "sample_size": 5,
+      "evidence_message_ids": [
+        "423b5315-7439-565b-a3f0-f2e2d3f847c9",
+        "b8bba9ae-26dd-511e-b83b-d9c22ca80bac",
+        "e0a5e7cc-d6b9-5b75-bb03-aa31245b03ad"
+      ],
+      "evidence": [
+        {
+          "message_id": "423b5315-7439-565b-a3f0-f2e2d3f847c9",
+          "quote": "我手机换号了，新号是 [手机号]。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "b8bba9ae-26dd-511e-b83b-d9c22ca80bac",
+          "quote": "邮箱也换了，现在用 [邮箱]。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "e0a5e7cc-d6b9-5b75-bb03-aa31245b03ad",
+          "quote": "报销单我填一下，卡号是 [银行卡号]。",
+          "speaker_role": "A"
+        }
+      ],
+      "support_count": 3,
+      "first_version": 3,
+      "last_updated_version": 3,
+      "status": "active",
+      "change_kind": "added",
+      "sources": [
+        "analysis:conv-demo-0001:1"
+      ],
+      "revision_of": null
+    },
+    {
+      "trait_key": "A.tone_intensity",
+      "entry_key": "A.tone_intensity@v1",
+      "owner": "A",
+      "statement": "在时间安排上语气强势，会直接否定对方提出的方案。",
+      "confidence": 0.71,
+      "sample_size": 4,
+      "evidence_message_ids": [
+        "0912ab89-2332-5270-be8f-e949decdc475"
+      ],
+      "evidence": [
+        {
+          "message_id": "0912ab89-2332-5270-be8f-e949decdc475",
+          "quote": "我没说你故意，只是觉得计划总是变。",
+          "speaker_role": "A"
+        }
+      ],
+      "support_count": 2,
+      "first_version": 1,
+      "last_updated_version": 1,
+      "status": "superseded",
+      "change_kind": "revised",
+      "sources": [
+        "analysis:conv-demo-0001:0"
+      ],
+      "revision_of": null,
+      "superseded_at_version": 3,
+      "superseded_by": "A.tone_intensity@v3"
+    },
+    {
+      "trait_key": "A.tone_intensity",
+      "entry_key": "A.tone_intensity@v3",
+      "owner": "A",
+      "statement": "在时间安排上语气偏坚决，但会补充理由或留出余地（如第 16 条的「我知道，但是时间要定下来」）。",
+      "confidence": 0.52,
+      "sample_size": 6,
+      "evidence_message_ids": [
+        "0912ab89-2332-5270-be8f-e949decdc475",
+        "c99b2922-d41e-537c-8a98-966f5d411623",
+        "93a65a89-2640-53c4-bb66-08ad6c6ce0b6"
+      ],
+      "evidence": [
+        {
+          "message_id": "0912ab89-2332-5270-be8f-e949decdc475",
+          "quote": "我没说你故意，只是觉得计划总是变。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "c99b2922-d41e-537c-8a98-966f5d411623",
+          "quote": "别尽量，直接定下来。",
+          "speaker_role": "A"
+        },
+        {
+          "message_id": "93a65a89-2640-53c4-bb66-08ad6c6ce0b6",
+          "quote": "上次也是这么说的。",
+          "speaker_role": "A"
+        }
+      ],
+      "support_count": 2,
+      "first_version": 3,
+      "last_updated_version": 3,
+      "status": "active",
+      "change_kind": "revised",
+      "sources": [
+        "analysis:conv-demo-0001:1"
+      ],
+      "revision_of": {
+        "version": 1,
+        "entry_key": "A.tone_intensity@v1",
+        "trait_key": "A.tone_intensity",
+        "statement": "在时间安排上语气强势，会直接否定对方提出的方案。",
+        "confidence": 0.71,
+        "sample_size": 4
+      }
+    }
+  ],
+  "warnings": [
+    "余数批 batch_index=1（13 条）在首次分析时即固定切片，追加消息不会自动并入；本画像覆盖 63 条消息。"
+  ]
+}

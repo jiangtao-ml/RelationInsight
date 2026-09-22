@@ -1,0 +1,6 @@
+# T-006 Streamlit frontend prototype (ASCII-only on purpose: pip on Windows may read this file
+# with the locale codec and choke on non-ASCII comments).
+# Backend deps (fastapi / openai / pytest ...) live in the repo-root requirements.txt.
+# Reproduce the page standalone:
+#   backend\.venv\Scripts\python.exe -m pip install -r frontend\requirements.txt
+streamlit>=1.31,<2

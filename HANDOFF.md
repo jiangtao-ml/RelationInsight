@@ -478,6 +478,75 @@ backend\.venv\Scripts\python.exe -m pytest tests/test_merge.py -q
 
 ---
 
+## T-006 Streamlit 前端原型（模拟数据） — 2026-09-22
+
+### 负责工具
+- 主责：**Codex**（Streamlit 页面实现与离线点验）
+- 协作：**Cursor**（信息架构、免责声明文案、与 `PRIVACY.md` 对齐）；**WorkBuddy**（按点击路径点验四块 UI、复跑 `pytest tests -q`）
+
+### 修改文件
+- `frontend/app.py`（新增）：Streamlit 单页原型 —— 左侧栏文本导入 + 顶部状态条 + 四个 tab（导入预览 / A/B 标记 / 画像卡片 / 证据列表）+ 底部免责声明
+- `frontend/fixtures/mock_profile.json`（新增）：符合 `ARCHITECTURE.md` §5 的快照样例（`conversation_id=conv-demo-0001`、`version=3`、`message_count=63`；共 7 条条目 = 有效 6 条 + `superseded` 历史 1 条，每条均带 evidence）
+- `frontend/requirements.txt`（新增）：`streamlit>=1.31,<2`（纯 ASCII，避免 Windows 下 pip 读取非 ASCII 注释触发编码错误）
+- `ARCHITECTURE.md`（修改）：§6 新增「T-006 UI 约定」（余数批「原地长大」维持现状 + 前端顶部常显当前覆盖消息数与最新版本号）；§9 记 0.5
+- `TASKS.md`（修改）：T-006 总表与明细状态改「完成」并补实现记录；T-005 三条遗留问题标「已确认」；修订记录 0.7
+- `HANDOFF.md`（本记录）
+- **未改动**：`backend/` 下任何文件（`main.py`、`db.py`、`schema.sql`、`parser.py`、`pipeline/*`、`llm/*`）、根 `requirements.txt`、`.gitignore`
+- **未触碰**：`ACCEPTANCE.md`（含使用者本人尚未提交的改动）
+- **未污染数据**：`backend/data/relationinsight.db` 仍为 7 张表 0 行；本任务纯前端，不读写数据库
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 安装前端依赖（首次）
+backend\.venv\Scripts\python.exe -m pip install -r frontend\requirements.txt
+
+# 启动原型（不启动 FastAPI，纯模拟数据）
+cd C:\Users\17352\Desktop\RelationInsight
+backend\.venv\Scripts\python.exe -m streamlit run frontend\app.py
+# 关键 URL：http://localhost:8501
+
+# 离线自测（无需网络、无需 API Key）
+backend\.venv\Scripts\python.exe -m pytest tests -q
+```
+
+### 测试结果
+（2026-09-22 本机实测：Python 3.12.4；`pytest tests -q` → **`93 passed in 3.67s`**，与 T-005 后持平——本任务未新增单测文件。UI 侧用 `streamlit.testing.v1.AppTest` 跑 3 个离线场景，全程零网络请求、零真实 API 调用。）
+
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| 验收 ① 不启动 FastAPI 即可演示四块 UI | 通过 | `AppTest` 默认场景：4 个 tab = ① 导入预览 / ② A/B 标记 / ③ 画像卡片 / ④ 证据列表，无异常；仅读本地 fixture，不连后端 |
+| 验收 ② 证据行可见 `message_id` 与脱敏 quote | 通过 | ④ 证据列表默认场景共 **20 行** evidence；quote 中出现 `[手机号]` / `[邮箱]` / `[银行卡号]`（与 `backend/llm/deepseek.py` 脱敏策略 α 一致） |
+| 验收 ③ 同意勾选框 | 通过 | 勾选后提示「已勾选同意（原型：只存本地 local session state）」；联调写入 `consents` 属 T-007 |
+| 验收 ④ 不做诊断式标题 | 通过 | 页面标题为「关系洞察 · 行为倾向归纳（原型）」，卡片文案为行为倾向类；全页无「自恋型」等诊断式命名 |
+| 导入预览解析正确性（默认示例） | 通过 | 派生自真实 `backend/parser.py`：**63 条成功 / 4 行错误 / 3 行空行** |
+| A/B 标记可改说话人 | 通过 | 场景 3：把 `seq=3` 改判为 B → 提示「已修改 1 条消息的说话人：seq 3 → B」，④ 中该 `message_id`（`63eaa5f5-…`）的 `speaker_role` 显示 `B（② 标记：由 A 改为 B）` |
+| 空/短文本降级 | 通过 | 场景 2：输入 2 条合法 + 3 行错误 → 指标 2 条 / 3 行错误 / 1 行空行，仅 2 个说话人下拉框，无异常 |
+| `frontend/app.py` 语法检查 | 通过 | `python -m py_compile frontend/app.py` OK |
+| fixture 结构与 §5 契约 | 通过 | `json.load` OK；`schema_version=1.0`、`version=3`、`message_count=63`、`counts.active_traits=6`、`superseded_traits=1`、`total_traits=7` |
+| 画像卡片三栏渲染 | 通过 | ③ 按 `snapshot_to_sections()` 分 A / B / dyad 三栏；卡片显示 statement / confidence / sample_size，并附 entry_key、change_kind、first_version、revision_of / superseded_by |
+| 真实后端联调 / 真 API | 未测 | 属 T-008；本任务按验收 ① 只用模拟数据 |
+| T-007 一键删除与同意落库 | 未测 | 属后续任务 |
+
+### 遗留问题
+- **② A/B 标记不写库**：`st.selectbox` 的改判只写 `st.session_state["speaker_overrides"]`，用于 ④ 证据展示的即时联动；持久化到 `messages.person_id` 属 T-008 接线。
+- **同意勾选框为本地 state**：勾选状态不落 `consents` 表（验收 ③ 允许原型阶段先本地 state），T-007 接 API。
+- **画像卡片数据源为静态 fixture**：`frontend/fixtures/mock_profile.json` 为手工构造（版本号、`covered_analyses` 等字段人写），不是真实 `profile_versions` 行的导出；T-008 应改为读后端画像接口。
+- **依赖隔离**：`streamlit`（实测 1.64.0）及其依赖（pandas / pyarrow / numpy / pillow / altair）装进了 `backend\.venv`，尚未按 `frontend/requirements.txt` 拆独立虚拟环境；根 `requirements.txt` 未改动。
+- **依赖缺失时的回退分支**：`openai` 等依赖不可用时，③ 画像卡片回退到本地等价分组逻辑（保证纯前端环境离线可演示）；该分支未在装了完整依赖的环境下覆盖测试。
+- **UI 顶部对余数批只做文案提示**：常显「当前覆盖消息数 + 最新画像版本号」，但不会主动告知「最新一批消息未进画像」；如需更强提示（如与 `messages` 总行数对比）留待后续。
+- **无真实 API 调用与无联调**：本任务不触碰网络，脱敏后的 quote 全部取自 fixture 预置文本。
+
+### 下一步
+- 建议下一任务：**T-007 一键删除与同意记录**（`consents` 落库 + 删除 API/UI + 残留检查；`conversations` 表已随 T-001 建表纳入 `REQUIRED_TABLES`，可支撑级联删除）。
+- 阻塞项：无。
+- 需人工确认：① T-007 删除范围是「删整个库」还是「按 `conversation_id`」；② 同意文案是否需 Cursor 按 `PRIVACY.md` 定稿后再落库。
+- 交接指向：T-007 交 **Codex**；**WorkBuddy** 用 `streamlit run frontend\app.py` 按点击路径点验四块 UI 并复跑 `pytest tests -q`（当前应为 `93 passed`）、确认 `backend/data/relationinsight.db` 仍为 0 行；**Cursor** 对照 `PRIVACY.md` 复核免责声明与数据来源提示文案。
+
+---
+
 ## 修订记录
 
 | 版本 | 日期 | 说明 |
@@ -487,3 +556,4 @@ backend\.venv\Scripts\python.exe -m pytest tests/test_merge.py -q
 | 0.3 | 2026-09-22 | T-001 记录补「更正」小节（Python 基线 / Git / message_id 决策落地）；追加 T-002、T-003 交接记录 |
 | 0.4 | 2026-09-22 | 追加 T-004 交接记录；2026-09-22 拍板同步进 ARCHITECTURE.md（person_id 冻结 / conversations 建表 / response_format / 重试 / 脱敏范围） |
 | 0.5 | 2026-09-22 | 追加 T-005 交接记录；T-005 轮拍板同步进 ARCHITECTURE.md（§4.5 `speaker_role` 对 `dyad.*` 确认为真实说话人 / §6 批次幂等键与追加消息不重算既有批次 / §8 证据不合法保持「丢弃 + 记录」）；TASKS.md T-005 状态改「完成」、T-004 补实现记录与遗留问题 |
+| 0.6 | 2026-09-22 | 追加 T-006 交接记录；T-006 轮拍板同步进 ARCHITECTURE.md（§6 余数批「原地长大」维持现状 + UI 顶部常显当前覆盖消息数与最新画像版本号）、TASKS.md（T-005 遗留问题标「已确认」、T-006 状态改「完成」、修订记录 0.7） |

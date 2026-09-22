@@ -24,7 +24,7 @@
 | T-003 | DeepSeek API 客户端封装 | Codex · Cursor（请求/响应 JSON Schema） | API 基址、模型名、Key 环境变量 | `DeepSeekClient`；超时/重试/错误类型；假客户端用于测试 | T-001 | 见下方 T-003 | 完成 |
 | T-004 | 分批分析管道（每 50 条一批，输出 JSON 画像） | Codex · Cursor（prompt 与 schema） | 已入库消息；T-003 客户端 | 批次 `analyses` + `evidence` 行 | T-002, T-003 | 见下方 T-004 | 完成 |
 | T-005 | 长期画像增量更新（新证据不覆盖旧结论，保留版本） | Codex · Cursor（合并规则） | 历史 `profile_versions` + 新批次分析 | 新版本画像；旧版本只读保留 | T-004 | 见下方 T-005 | 完成 |
-| T-006 | Streamlit 前端原型（模拟数据：导入、A/B 标记、画像卡片、证据列表） | Codex · Cursor（信息架构）· WorkBuddy（界面点验） | 模拟 JSON；UI 线框文字 | `app.py`（或 `frontend/`）可演示四块界面 | 无（可与后端并行） | 见下方 T-006 | 未开始 |
+| T-006 | Streamlit 前端原型（模拟数据：导入、A/B 标记、画像卡片、证据列表） | Codex · Cursor（信息架构）· WorkBuddy（界面点验） | 模拟 JSON；UI 线框文字 | `app.py`（或 `frontend/`）可演示四块界面 | 无（可与后端并行） | 见下方 T-006 | 完成 |
 | T-007 | 一键删除与同意记录功能 | Codex · Cursor（隐私条款落地） | `PRIVACY.md`；会话/人物 ID | 同意写入；删除 API + UI；残留检查脚本 | T-001, T-006 | 见下方 T-007 | 未开始 |
 | T-008 | 集成与验收 | Cursor（主导）· Codex（修缺陷）· WorkBuddy（按清单执行） | `ACCEPTANCE.md`；已实现 T-001–T-007 | 验收记录；已知问题列表；是否达标结论 | T-001–T-007 | 见下方 T-008 | 未开始 |
 
@@ -121,6 +121,12 @@
 
 **备注：** `trait_key` 直接采用 `claim_key`（如 `A.request_style`），跨批次稳定；`changelog_json` 按 added / supported / weakened / revised 分类留痕。
 
+**遗留问题（2026-09-22 T-006 轮拍板）：**
+
+- 证据 `quote` 折叠空白并截断到 80 字符（`QUOTE_MAX_CHARS`）——**已确认（2026-09-22）：维持现状**；只取前缀仍满足 `ARCHITECTURE.md` §4.5「脱敏后文本的子串」，要看完整原文请回查 `messages.body`。
+- 本模块无并发控制：同一会话并发 `update_profile` 可能撞 `UNIQUE(conversation_id, version)`——**已确认（2026-09-22）：MVP 不加锁，单用户同步调用**，暂不处理。
+- 余数批「原地长大」：不足 50 条的尾批首次分析后即固定，追加消息可能长期不进画像——**已确认（2026-09-22）：维持现状**，改由 T-006 UI 顶部常显「当前覆盖消息数 + 最新画像版本号」提示（见 `ARCHITECTURE.md` §6）。
+
 ---
 
 ## T-006 Streamlit 前端原型（模拟数据）
@@ -132,7 +138,9 @@
 | 输出 | Streamlit 应用：① 文本导入区 ② A/B 标记 ③ 画像卡片 ④ 证据列表（点击结论展开原文） |
 | 依赖 | 无（模拟数据可先做）；与后端联调依赖 T-001 后的 API，属 T-008 |
 | 验收标准 | ① 不启动 FastAPI 也能用模拟数据演示四块 UI；② 证据行可见 `message_id` 与 quote（脱敏）；③ **同意勾选框**：勾选后（联调时）写入 `consents`；原型阶段可先本地 state；④ 不做诊断式标题（如“自恋型”） |
-| 当前状态 | 未开始 |
+| 当前状态 | 完成 |
+
+**实现记录（2026-09-22）：** 新增 `frontend/app.py`（Streamlit 四块界面 + 顶部「覆盖消息数 / 最新版本号」 + 同意勾选框）、`frontend/fixtures/mock_profile.json`（符合 `ARCHITECTURE.md` §5 快照结构；**共 7 条条目 = 有效 6 条 + `superseded` 历史 1 条**——有效条目为 A 3 条 / B 1 条 / dyad 2 条，另 1 条为 `A.tone_intensity@v1` 的 `superseded` 历史条目）、`frontend/requirements.txt`（`streamlit>=1.31,<2`）；**未改动 `backend/` 任何文件**。①「导入预览」与 ②「A/B 标记」复用 `backend/parser.py`（不启动 FastAPI、不读写数据库）；③ 画像卡片按 `snapshot_to_sections()` 分 A / B / dyad 三栏（`openai` 等依赖缺失时回退到本地等价分组，保证纯前端环境可离线演示）；④ 证据列表用 `st.expander` 展示 `message_id` / 脱敏 `quote` / `speaker_role`。同意勾选框为本地 session state（联调时写入 `consents`，属 T-007）；页面标题与卡片文案均为「行为倾向」类，**无诊断式命名**。
 
 ---
 
@@ -190,3 +198,4 @@ WorkBuddy 在 T-001、T-006、T-007、T-008 必须参与运行验证。
 | 0.4 | 2026-09-22 | 总表与 T-002/T-003 明细「当前状态」改为完成（交接记录见 HANDOFF.md） |
 | 0.5 | 2026-09-22 | T-004 完成（总表与明细状态改「完成」）；拍板落地：person_id 冻结、conversations 建表、解析错误行与重复导入策略区分、response_format / 重试 / 超时确认、脱敏范围不扩展 |
 | 0.6 | 2026-09-22 | T-005 完成（总表与明细状态改「完成」）；T-004 补「幂等键 = batch_index / 追加消息不重算既有批次」实现记录与遗留问题（不加 sample_size 列、不加续跑入口）；拍板落地：speaker_role 对 `dyad.*` 写真实说话人、证据不合法保持「丢弃 + 记录」 |
+| 0.7 | 2026-09-22 | T-006 完成（总表与明细状态改「完成」并补实现记录）；T-005 遗留问题标「已确认」：`quote` 截断 80 字符维持现状、`profile_versions` 并发不加锁；拍板落地：余数批「原地长大」维持现状并在 UI 顶部提示（见 `ARCHITECTURE.md` §6） |
