@@ -1,19 +1,24 @@
-"""T-004 分批分析管道包。
+"""T-004 / T-005 管线包：分批分析 + 长期画像增量更新。
 
-对外只需记住三个名字：
+对外只需记住这几个名字：
 
-- `analyze_conversation(messages, client, ...)`：消息 → 分批 → 模型 → 校验 → 落库。
+- `analyze_conversation(messages, client, ...)`：消息 → 分批 → 模型 → 校验 → 落库（T-004）。
 - `analyze_conversation_from_db(conversation_id, client, ...)`：同上，但消息从库里读。
 - `plan_batches(messages)`：只看切批结果（不调模型、不碰库）。
+- `update_profile(conversation_id, ...)`：把新批次折成新一版 `profile_versions`（T-005）。
+- `merge_profile(...)`：纯函数版合并（不碰数据库），便于单测与人工复核。
 
-典型用法（T-006/T-007 可直接照抄）::
+典型用法（T-006 / T-007 可直接照抄）::
 
     from llm import DeepSeekClient
-    from pipeline import analyze_conversation_from_db
+    from pipeline import analyze_conversation_from_db, update_profile
 
     report = analyze_conversation_from_db("conv-1", DeepSeekClient())
-    if not report.ok:
-        print(report.message)   # 例如：样本不足 / 分析中断
+    if report.ok:
+        merged = update_profile("conv-1")
+        print(merged.message)   # 例如：画像已更新到 v2（上一版 v1）：added 1、supported 2
+
+`MergeReport.status == nothing_to_do` 表示没有新批次：不写库、不升版本（幂等，见 `merge.py`）。
 """
 
 from __future__ import annotations
@@ -25,6 +30,34 @@ from .batch import (
     BatchPlan,
     InsufficientSampleError,
     plan_batches,
+)
+from .merge import (
+    SNAPSHOT_SCHEMA_VERSION,
+    STATUS_MERGED,
+    STATUS_NOTHING_TO_DO,
+    TRAIT_STATUS_ACTIVE,
+    TRAIT_STATUS_SUPERSEDED,
+    WARNING_BAD_TRAIT_KEY,
+    WARNING_BROKEN_ANALYSIS,
+    WARNING_EVIDENCE_MISMATCH,
+    WARNING_MISSING_CLAIM_KEY,
+    AnalysisRecord,
+    EvidenceRecord,
+    MergeReport,
+    MergeResult,
+    ProfileVersionRecord,
+    TraitChange,
+    count_covered_messages,
+    iter_snapshot_traits,
+    load_analyses,
+    load_evidence,
+    load_latest_profile,
+    load_profile_versions,
+    make_profile_id,
+    merge_profile,
+    persist_profile_version,
+    snapshot_to_sections,
+    update_profile,
 )
 from .prompt import PROMPT_VERSION, SYSTEM_PROMPT, build_system_prompt
 from .run import (
@@ -38,7 +71,6 @@ from .run import (
     REASON_EVIDENCE_NOT_IN_BATCH,
     REASON_EVIDENCE_NOT_IN_DB,
     REASON_NO_EVIDENCE,
-    STATUS_NOTHING_TO_DO,
     BatchOutcome,
     DroppedItem,
     FilteredProfile,
@@ -52,8 +84,35 @@ from .run import (
     normalise_quote,
     persist_batch,
 )
-
+from .traits import (
+    CHANGE_ADDED,
+    CHANGE_KINDS,
+    CHANGE_REVISED,
+    CHANGE_SUPPORTED,
+    CHANGE_WEAKENED,
+    RULES_VERSION,
+    SUPPORT_SIMILARITY_THRESHOLD,
+    WEAKEN_CONFIDENCE_DROP,
+    ChangeClassification,
+    classify_change,
+    combine_observation,
+    confidence_weight,
+    describe_rules,
+    fold_new_observations,
+    has_negation_flip,
+    is_dyad_trait,
+    is_well_formed_trait_key,
+    make_entry_key,
+    merge_evidence_ids,
+    merge_unique_ids,
+    normalise_statement,
+    normalise_trait_key,
+    owner_of,
+    statement_similarity,
+    weighted_average_confidence,
+)
 __all__ = [
+    # T-004 分批分析
     "BATCH_SIZE",
     "MIN_MESSAGES_FOR_ANALYSIS",
     "PROMPT_VERSION",
@@ -68,7 +127,6 @@ __all__ = [
     "REASON_EVIDENCE_NOT_IN_BATCH",
     "REASON_EVIDENCE_NOT_IN_DB",
     "REASON_NO_EVIDENCE",
-    "STATUS_NOTHING_TO_DO",
     "Batch",
     "BatchOutcome",
     "BatchPlan",
@@ -86,4 +144,56 @@ __all__ = [
     "normalise_quote",
     "persist_batch",
     "plan_batches",
+    # T-005 长期画像增量更新
+    "SNAPSHOT_SCHEMA_VERSION",
+    "STATUS_MERGED",
+    "STATUS_NOTHING_TO_DO",
+    "TRAIT_STATUS_ACTIVE",
+    "TRAIT_STATUS_SUPERSEDED",
+    "WARNING_BAD_TRAIT_KEY",
+    "WARNING_BROKEN_ANALYSIS",
+    "WARNING_EVIDENCE_MISMATCH",
+    "WARNING_MISSING_CLAIM_KEY",
+    "RULES_VERSION",
+    "CHANGE_ADDED",
+    "CHANGE_SUPPORTED",
+    "CHANGE_WEAKENED",
+    "CHANGE_REVISED",
+    "CHANGE_KINDS",
+    "SUPPORT_SIMILARITY_THRESHOLD",
+    "WEAKEN_CONFIDENCE_DROP",
+    "AnalysisRecord",
+    "ChangeClassification",
+    "EvidenceRecord",
+    "MergeReport",
+    "MergeResult",
+    "ProfileVersionRecord",
+    "TraitChange",
+    "classify_change",
+    "combine_observation",
+    "confidence_weight",
+    "count_covered_messages",
+    "describe_rules",
+    "fold_new_observations",
+    "has_negation_flip",
+    "is_dyad_trait",
+    "is_well_formed_trait_key",
+    "iter_snapshot_traits",
+    "load_analyses",
+    "load_evidence",
+    "load_latest_profile",
+    "load_profile_versions",
+    "make_entry_key",
+    "make_profile_id",
+    "merge_evidence_ids",
+    "merge_profile",
+    "merge_unique_ids",
+    "normalise_statement",
+    "normalise_trait_key",
+    "owner_of",
+    "persist_profile_version",
+    "snapshot_to_sections",
+    "statement_similarity",
+    "update_profile",
+    "weighted_average_confidence",
 ]

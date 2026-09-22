@@ -403,6 +403,79 @@ cd C:\Users\17352\Desktop\RelationInsight\backend
 - 需人工确认：① `speaker_role` 对 `dyad` 证据的读法（§4.5）；② 追加消息后是否需要重算既有批次（幂等键为 `batch_index`）；③ 是否给 `analyses` 加独立 `sample_size` 列；④ 失败批次是否需要「续跑」入口；⑤「证据不合法即整批失败」是否要成为默认。
 - 交接指向：T-005 交 **Codex**；**Cursor** 定 `trait_key` 与合并冲突策略；**WorkBuddy** 复跑 `pytest tests -q`（当前应为 `70 passed`）并确认 `backend/data/relationinsight.db` 仍为 0 行。
 
+## T-005 长期画像增量更新 — 2026-09-22
+
+### 负责工具
+- 主责：**Codex**（合并算法实现与离线自测）
+- 协作：**Cursor**（`trait_key` 定义、四类变更与冲突合并策略、快照字段契约）；**WorkBuddy**（复跑 `pytest tests -q`、确认 `backend/data/relationinsight.db` 仍为 0 行）
+
+### 修改文件
+- `backend/pipeline/traits.py`（新增）：`trait_key` 规范化（`A.` / `B.` / `dyad.` 前缀）、`classify_change`（added / supported / weakened / revised 四类）、`weighted_average_confidence`（样本量优先加权）、`combine_observation`、`merge_unique_ids`（保首见顺序）；常量 `RULES_VERSION="1.0"`、`SUPPORT_SIMILARITY_THRESHOLD=0.5`、`WEAKEN_CONFIDENCE_DROP=0.15`
+- `backend/pipeline/merge.py`（新增）：`update_profile`（主入口）/ `merge_profile`（纯函数）/ `persist_profile_version`（唯一 INSERT）/ `load_latest_profile` / `load_profile_versions` / `load_analyses` / `load_evidence` / `count_covered_messages` / `snapshot_to_sections` / `iter_snapshot_traits`；数据类 `AnalysisRecord` / `EvidenceRecord` / `ProfileVersionRecord` / `TraitChange` / `MergeResult` / `MergeReport`
+- `backend/pipeline/__init__.py`（修改）：补齐 T-005 出口
+- `tests/test_merge.py`（新增）：**23 例**，离线（`llm.FakeDeepSeekClient` + pytest `tmp_path`），逐条对应验收 ①–④
+- `ARCHITECTURE.md`（修改）：§0 追加「2026-09-22 追加冻结（T-005 轮拍板）」表；§4.5 取消「需人工确认」——`speaker_role` 对 `dyad.*` 恒记真实说话人；§6 新增「批次幂等键 = `batch_index`、追加消息后不重算既有批次」；§8 新增「证据不合法 → 降级为丢弃 + 记录」行；§9 记 0.4
+- `TASKS.md`（修改）：T-005 总表与明细状态改「完成」并补实现记录；T-004 补实现记录与遗留问题；修订记录 0.6
+- `HANDOFF.md`（本记录）
+- **未改动**：`backend/main.py`、`backend/db.py`、`backend/schema.sql`、`backend/parser.py`、`backend/pipeline/batch.py`、`backend/pipeline/prompt.py`、`backend/pipeline/run.py`、`backend/llm/*`、`requirements.txt`
+- **未触碰**：`ACCEPTANCE.md`（含使用者本人尚未提交的改动）
+- **未污染数据**：`backend/data/relationinsight.db` 仍为 7 张表 0 行；单测与冒烟一律用临时库（pytest `tmp_path` / 系统临时目录），跑完即弃
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 全量单测（离线、零网络）
+cd C:\Users\17352\Desktop\RelationInsight
+backend\.venv\Scripts\python.exe -m pytest tests -q
+
+# 只跑本任务
+backend\.venv\Scripts\python.exe -m pytest tests/test_merge.py -q
+
+# 合并调用（读库中该会话的 analyses / evidence → 新版本画像；全程离线）
+#   from pipeline import update_profile
+#   report = update_profile("conv-1")
+#   print(report.status, report.version)   # completed 2
+#   print(report.change_counts)            # {'added': 0, 'supported': 2, 'weakened': 0, 'revised': 0}
+#   print(report.message)                  # 画像已更新到 v2（上一版 v1）：added 0、supported 2、weakened 0、revised 0
+# 注意：会话必须已有 T-004 写入的 analyses 行，否则 status=nothing_to_do（不写库、不升版本）
+```
+
+### 测试结果
+（2026-09-22 本机实测：Python 3.12.4；`pytest tests -q` → **`93 passed in 4.68s`**，其中本任务 23 例、T-004 34 例、T-003 25 例、T-002 11 例。全程零网络请求、零真实 API 调用。下表除标注「未测」外，均为本次实测或源码核对结果。）
+
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| 验收 ① 新增批次后版本 +1 | 通过 | 独立冒烟复验：50 条 → v1；追加 40 条使尾批越界成 `batch_index=1` → v2，`previous_version=1`、`message_count=90`、`analyses_used=1`、`analyses_skipped=1`（只折入新增尾批） |
+| 验收 ① 无新批次不写行（幂等） | 通过 | 再次调用 → `nothing_to_do`，`profile_versions` 行数不变；`test_repeated_merge_without_new_batch_writes_nothing` |
+| 验收 ① 余数批「原地长大」不重算 | 通过 | 冒烟复验：70 条 → v1；追加 20 条后管道仍计划 2 批、新写 `analyses` 0 条（`batch_index=1` 已存在）→ `nothing_to_do`，仍为 v1 且 `message_count=70` |
+| 验收 ② 旧版快照逐字节不变 | 通过 | 升到 v2 后重读 v1 `snapshot_json`，与升版前**逐字节相同**（2107 字节）；旧版内 `A.request_style` 的 `statement`、`sample_size` 保持原值 |
+| 验收 ③ 历史表述保留 + 结论级 `revision_of` | 通过 | `supported` 沿用旧表述并累加；`revised` 时新版另加条目、写 `revision_of`，旧条目标 `superseded_by` / `superseded_at_version`（`test_revision_adds_entry_and_records_revision_of`） |
+| 验收 ④ 不 `UPDATE` 覆盖旧快照行 | 通过 | 源码核对：`merge.py` 对 `profile_versions` **只有一条 `INSERT`**，全文件无 SQL `UPDATE` / `DELETE`（命中的只是内存字典 `dict.update` 与注释）；`test_profile_versions_are_append_only` |
+| 合并数值正确性 | 通过 | `confidence` 取样本量加权平均、`sample_size` 累加（25 → 45）、`evidence_message_ids` 合并去重（3 → 6），`statement` 不变 |
+| 证据元数据跨版本保留 | 通过 | 脱敏 `quote` 与真实 `speaker_role` 随结论带入新版 |
+| 坏批次降级 | 通过 | `analyses.result_json` 不可解析 → 跳过并记 `WARNING_BROKEN_ANALYSIS`，且**不计入** `covered_analyses`（下次仍可重试） |
+| 越界 / 跨会话保护 | 通过 | 传入其他 `conversation_id` 的 `analyses` 被拒；两会话各写各的 `profile_versions`，互不干扰 |
+| 纯规则单测（`traits.py`） | 通过 | 四类分类、加权平均、ID 合并保序、`trait_key` 规范化保守性、`statement_similarity` 对称性与阈值 |
+| 真实 DeepSeek API 端到端 | 未测 | 无 Key，本任务不打真实网；真机上 `revised` 判定依赖模型返回的表述差异 |
+| T-006 UI / T-007 删除 | 未测 | 属后续任务 |
+
+### 遗留问题
+- 变更分类是启发式：字符相似度 ≥ 0.5 视为 `supported`，置信度下滑 ≥ 0.15 视为 `weakened`，出现否定翻转或表述差异过大则判 `revised`。阈值集中在 `traits.py`（`SUPPORT_SIMILARITY_THRESHOLD` / `WEAKEN_CONFIDENCE_DROP`），将来调参不必改 `merge.py`。
+- 幂等键是「已覆盖分析行 ID 的并集」（`covered_analyses`，由 `batch_index` 推导）：**已分析过的批次永不重算**，故「追加消息后旧批结论是否过期」本版不处理（2026-09-22 已拍板维持现状，见 `ARCHITECTURE.md` §6）。
+- 余数批会「原地长大」：不足 50 条的尾批首次分析后即固定；若后续追加未越过 50 条边界，新消息不会被任何批次覆盖（冒烟已实测：70 → 90 条时无新批次，画像停在 v1）。
+- `analyses` 表仍无独立 `sample_size` 列（T-004 遗留）；`snapshot_json.message_count` 为被覆盖消息数。
+- 本模块无并发控制：同一会话并发 `update_profile` 可能撞 `UNIQUE(conversation_id, version)`。MVP 单用户同步调用，暂不处理。
+- `snapshot_json` 顶层 `supersedes_version` 记录上一版版本号；结论级修订另见条目内 `revision_of` / `superseded_by`。
+- 本次交接未改动任何 T-006+ 的代码。
+
+### 下一步
+- 建议下一任务：**T-006 Streamlit 前端原型**（可先用模拟数据；画像卡片直接渲染 `snapshot_to_sections()` 的输出即可对接 T-005）。
+- 阻塞项：无。
+- 需人工确认：① 证据 `quote` 折叠空白并截断 80 字符（`QUOTE_MAX_CHARS`）是否满足 UI 展示需求；② 余数批「原地长大」导致追加消息可能长期不进画像，是否需在 UI 解释或改批次策略；③ 并发写 `profile_versions` 是否需要加锁。
+- 交接指向：T-006 交 **Codex**；**Cursor** 定信息架构与免责声明文案；**WorkBuddy** 复跑 `pytest tests -q`（当前应为 `93 passed`）并确认 `backend/data/relationinsight.db` 仍为 0 行。
+
 ---
 
 ## 修订记录
@@ -413,3 +486,4 @@ cd C:\Users\17352\Desktop\RelationInsight\backend
 | 0.2 | 2026-09-22 | 追加 T-001 交接记录 |
 | 0.3 | 2026-09-22 | T-001 记录补「更正」小节（Python 基线 / Git / message_id 决策落地）；追加 T-002、T-003 交接记录 |
 | 0.4 | 2026-09-22 | 追加 T-004 交接记录；2026-09-22 拍板同步进 ARCHITECTURE.md（person_id 冻结 / conversations 建表 / response_format / 重试 / 脱敏范围） |
+| 0.5 | 2026-09-22 | 追加 T-005 交接记录；T-005 轮拍板同步进 ARCHITECTURE.md（§4.5 `speaker_role` 对 `dyad.*` 确认为真实说话人 / §6 批次幂等键与追加消息不重算既有批次 / §8 证据不合法保持「丢弃 + 记录」）；TASKS.md T-005 状态改「完成」、T-004 补实现记录与遗留问题 |

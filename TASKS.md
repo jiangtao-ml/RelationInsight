@@ -23,7 +23,7 @@
 | T-002 | 文本解析器：解析 A/B 说话人，生成 `message_id` | Codex · Cursor（格式规格） | 样例聊天文本；说话人规则 | `parser` 模块；`Message` 列表；解析错误报告 | T-001 | 见下方 T-002 | 完成 |
 | T-003 | DeepSeek API 客户端封装 | Codex · Cursor（请求/响应 JSON Schema） | API 基址、模型名、Key 环境变量 | `DeepSeekClient`；超时/重试/错误类型；假客户端用于测试 | T-001 | 见下方 T-003 | 完成 |
 | T-004 | 分批分析管道（每 50 条一批，输出 JSON 画像） | Codex · Cursor（prompt 与 schema） | 已入库消息；T-003 客户端 | 批次 `analyses` + `evidence` 行 | T-002, T-003 | 见下方 T-004 | 完成 |
-| T-005 | 长期画像增量更新（新证据不覆盖旧结论，保留版本） | Codex · Cursor（合并规则） | 历史 `profile_versions` + 新批次分析 | 新版本画像；旧版本只读保留 | T-004 | 见下方 T-005 | 未开始 |
+| T-005 | 长期画像增量更新（新证据不覆盖旧结论，保留版本） | Codex · Cursor（合并规则） | 历史 `profile_versions` + 新批次分析 | 新版本画像；旧版本只读保留 | T-004 | 见下方 T-005 | 完成 |
 | T-006 | Streamlit 前端原型（模拟数据：导入、A/B 标记、画像卡片、证据列表） | Codex · Cursor（信息架构）· WorkBuddy（界面点验） | 模拟 JSON；UI 线框文字 | `app.py`（或 `frontend/`）可演示四块界面 | 无（可与后端并行） | 见下方 T-006 | 未开始 |
 | T-007 | 一键删除与同意记录功能 | Codex · Cursor（隐私条款落地） | `PRIVACY.md`；会话/人物 ID | 同意写入；删除 API + UI；残留检查脚本 | T-001, T-006 | 见下方 T-007 | 未开始 |
 | T-008 | 集成与验收 | Cursor（主导）· Codex（修缺陷）· WorkBuddy（按清单执行） | `ACCEPTANCE.md`；已实现 T-001–T-007 | 验收记录；已知问题列表；是否达标结论 | T-001–T-007 | 见下方 T-008 | 未开始 |
@@ -98,6 +98,10 @@
 **已确认（2026-09-22）：** 总数 &lt; 20 条**拒绝正式分析**，返回「样本不足」，**不调用模型、不写库**（不做「预览草稿」）。恰好 20 条放行（边界为 `>=`）。  
 **实现记录：** `backend/pipeline/`（`batch.py` / `prompt.py` / `run.py`）；`analysis_id = uuid5(NAMESPACE_URL, f"analysis:{conversation_id}:{batch_index}")` 确定性生成，已存在的批次跳过不重算（幂等）；某批抛 `DeepSeekError` 时停止后续批次并保留已写入的批次。
 
+**实现记录（2026-09-22 拍板补充）：** 幂等键 = `(conversation_id, batch_index)`；会话**追加**消息后**不重算**既有批次，只分析新增尾批（余数批「原地长大」也不重算）——完整约定见 `ARCHITECTURE.md` §6。
+
+**遗留问题（2026-09-22 拍板：暂不处理）：** ③ `analyses` 表**不加**独立 `sample_size` 列（样本量仍在 `result_json.warnings`，可由 `seq_from` / `seq_to` 推导），v1.1 再考虑；④ **不加**失败批次续跑入口，MVP 保持「失败即停」，已写入的批次保留。
+
 ---
 
 ## T-005 长期画像增量更新逻辑
@@ -109,7 +113,13 @@
 | 输出 | `profile_versions.version = 旧版 + 1` 的完整快照；变更摘要（added / supported / weakened / revised）；旧行不删 |
 | 依赖 | T-004 |
 | 验收标准 | ① 新增一批（或追加 20 条且分析完成）后版本号 +1；② 旧版本 JSON 仍可读取；③ 同一 `trait_key` 的历史表述仍在旧版中；新版可含 `supersedes_version` 或结论级 `revision_of`；④ 不得 `UPDATE` 覆盖旧版快照行 |
-| 当前状态 | 未开始 |
+| 当前状态 | 完成 |
+
+**实现记录（2026-09-22）：** 新增 `backend/pipeline/merge.py`（`merge_profile` 纯函数 + `persist_profile_version` / `update_profile` 落库）、`backend/pipeline/traits.py`（`trait_key` 规范化、四类变更分类、加权平均 confidence）、`tests/test_merge.py`（23 例离线单测）；`backend/pipeline/__init__.py` 增补出口。
+
+**合并约定（2026-09-22）：** ① 幂等键 = 已覆盖批次集合（`covered_analyses` / `covered_batch_indexes`，由 `batch_index` 推导）——已合并过的批次不重复折叠，同一会话追加消息后只折叠新增尾批；无新批次时 `status=nothing_to_do` 且**不写库**。② 版本号 = 旧版 + 1；**只 INSERT** 新 `profile_versions` 行，旧行与其 `snapshot_json` 一律不改写（符合 §4.6「禁止 UPDATE」）。③ 同一 `trait_key` 再次出现：`confidence` 取加权平均、`sample_size` 累加、`evidence_message_ids` 合并去重。④ 新证据与旧结论矛盾（`revised`）时**不删旧结论**，新版另加条目并以 `revision_of` 指向旧版，旧条目标 `superseded_by` / `superseded_at_version`；`snapshot_json` 顶层含 `supersedes_version`。
+
+**备注：** `trait_key` 直接采用 `claim_key`（如 `A.request_style`），跨批次稳定；`changelog_json` 按 added / supported / weakened / revised 分类留痕。
 
 ---
 
@@ -179,3 +189,4 @@ WorkBuddy 在 T-001、T-006、T-007、T-008 必须参与运行验证。
 | 0.3 | 2026-09-22 | Python 基线改 3.12.4；message_id 冻结为方案 A（重复导入拒绝整批）；T-002/T-003 实现与单测完成 |
 | 0.4 | 2026-09-22 | 总表与 T-002/T-003 明细「当前状态」改为完成（交接记录见 HANDOFF.md） |
 | 0.5 | 2026-09-22 | T-004 完成（总表与明细状态改「完成」）；拍板落地：person_id 冻结、conversations 建表、解析错误行与重复导入策略区分、response_format / 重试 / 超时确认、脱敏范围不扩展 |
+| 0.6 | 2026-09-22 | T-005 完成（总表与明细状态改「完成」）；T-004 补「幂等键 = batch_index / 追加消息不重算既有批次」实现记录与遗留问题（不加 sample_size 列、不加续跑入口）；拍板落地：speaker_role 对 `dyad.*` 写真实说话人、证据不合法保持「丢弃 + 记录」 |
