@@ -33,7 +33,14 @@
 | 批次幂等键 | **冻结**：`(conversation_id, batch_index)`；追加消息后**不重算**既有批次，只分析新增尾批（见 §6） |
 | 证据不合法 | **保持**「降级为丢弃 + 记录」，**不**改为整批失败（见 §8） |
 
-仍待确认项见各节标注「需人工确认」（如全局清空、时区展示）。  
+**2026-09-22 追加冻结（T-007 轮拍板）：**
+
+| 项 | 决策 |
+|----|------|
+| 删除范围 | **已确认**：以「按会话删除」（`DELETE /conversations/{id}`）为主；「清空全部本地数据」（`DELETE /data`）只放在设置页，作为危险操作，需二次确认（见 §7） |
+| 同意文案 | **已确认**：严格按 `PRIVACY.md` §1.3 文案落地，**不自行发挥**（见 §4.7） |
+
+仍待确认项见各节标注「需人工确认」（如时区展示、删除后是否保留空库结构）。  
 
 ---
 
@@ -248,7 +255,15 @@ person_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"person:{conversation_id}:{role}
 | created_at | TEXT | NOT NULL | |
 | revoked_at | TEXT | NULL | |
 
-**已确认（v0.1）：** 同意来自 UI 勾选框；勾选后插入本表（`granted=1`）。撤回/删除策略仍 **需人工确认**（删行 vs 无原文审计）。
+**已确认（v0.1）：** 同意来自 UI 勾选框；勾选后插入本表（`granted=1`）。
+
+**已确认（2026-09-22，T-007 轮拍板）：** 同意文案**严格按 `PRIVACY.md` §1.3 落地，不自行发挥**。实现上以 `backend/privacy.py` 的 `CONSENT_STATEMENT`（及版本号 `CONSENT_STATEMENT_VERSION`）为**唯一来源**；前端直接引用该常量，不复制改写文案，避免两处漂移。
+
+**落库内容仅限 `PRIVACY.md` §1.2 允许的四项：** 时间（`created_at`）/ 会话 ID（`conversation_id`）/ 同意范围（`scope`，枚举 `both_parties_informed` / `self_only`）/ 同意书文案版本号（写入 `note`，形如 `statement_version=v0.1`）。**禁止**写入聊天原文、真实姓名、证件号。
+
+**有效同意判定：** `granted=1` **且** `revoked_at IS NULL`（`privacy.has_valid_consent()`）；无有效同意时分析入口一律 `4xx`（`403 no_consent`），前端「开始分析」按钮保持禁用。
+
+**撤回 / 删除策略（按「删行」实现）：** 撤回同意只写 `revoked_at`（保留行以便回看同意历史）；删除会话或清空全库时，该范围内的 `consents` 行**随事务一并删除**（PRIVACY §2.1 的「删除」分支），删除动作本身只留**无原文审计**（时间 + 范围 + 各表行数，见 §7）。
 
 ### 4.8 `corrections`（可修正，建议）
 
@@ -354,9 +369,17 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 | GET | `/conversations/{id}/profile/versions` | 版本列表 |
 | GET | `/conversations/{id}/evidence` | 证据 |
 | DELETE | `/conversations/{id}` | 一键删除该会话 |
-| DELETE | `/data` | 清空本地全部（危险，需二次确认） |
+| DELETE | `/data` | **清空本机全部数据**（危险操作，只放在设置页；`?confirm=true` 二次确认） |
 
-**需人工确认：** 是否实现全局清空。
+**已确认（2026-09-22，T-007 轮拍板）：** 删除**以「按会话删除」为主**——`DELETE /conversations/{id}`，UI 主入口「删除本会话」；**「清空全部本地数据」**——`DELETE /data`——**只放在设置页**，作为**危险操作**，**必须二次确认**（勾选「我理解不可恢复」+ 再次点击按钮）后才允许执行。
+
+**T-007 实现约定：**
+
+- 两个删除接口都要求显式二次确认参数（`?confirm=true`）；缺失一律 `400 confirmation_required`，**不做**「无参数即删除」的默认行为。
+- 删除在**单事务**内按外键安全顺序执行：`evidence` → `analyses` → `profile_versions` → `messages` → `persons` → `consents` → `conversations`；提交后执行 `VACUUM` 并清理 `-wal` / `-shm` / `-journal` 临时文件，降低页内残留。
+- 残留检查：删除后对 db 文件（含临时文件）做**字节级检索**，确认已删消息的原文片段 **0 命中**；检查结果只报告「文件名 + 命中数」，**不回显**命中内容。
+- 每次删除返回**无原文回执**：`deleted_at`（UTC 时间）、范围（会话 ID 或 `all_data`）、各表删除行数、是否 `VACUUM`、残留检查结论；回执与审计日志**逐字不含** `body` / `quote` / 会话标题等原文。
+- 同意闸门：一切分析入口（如 `POST /conversations/{id}/analyze`）先校验有效同意，无同意时 `403`，且**不得**触碰分批管道与模型客户端。
 
 ---
 
@@ -389,3 +412,4 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 | 0.3 | 2026-09-22 | 拍板落地：person_id 生成方式冻结（§4.1）；conversations 建表（§4.2）；区分「解析错误行」与「message_id 冲突」两条策略（§6）；response_format / 重试 / 超时确认（§8）；脱敏范围不扩展（§8）；补 §4.5 speaker_role 读法 |
 | 0.4 | 2026-09-22 | T-005 轮拍板冻结：§4.5 取消「需人工确认」——`speaker_role` 对 `dyad.*` 恒记真实说话人；§6 批次幂等键 = `batch_index`、追加消息后不重算既有批次、只分析新增尾批；§8 证据不合法保持「降级为丢弃 + 记录」 |
 | 0.5 | 2026-09-22 | T-006 轮拍板：余数批「原地长大」维持现状；新增 UI 约定——前端顶部常显当前覆盖消息数与最新画像版本号（§6） |
+| 0.6 | 2026-09-22 | T-007 轮拍板：① 删除以「按会话删除」为主，「清空全部本地数据」为设置页危险操作 + 二次确认（§0 / §7）；② 同意文案严格按 `PRIVACY.md` §1.3 落地、不自行发挥（§0 / §4.7）；补 T-007 实现约定（删除顺序、二次确认参数、`VACUUM`、残留检查、无原文回执、同意闸门） |

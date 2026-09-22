@@ -545,6 +545,84 @@ backend\.venv\Scripts\python.exe -m pytest tests -q
 - 需人工确认：① T-007 删除范围是「删整个库」还是「按 `conversation_id`」；② 同意文案是否需 Cursor 按 `PRIVACY.md` 定稿后再落库。
 - 交接指向：T-007 交 **Codex**；**WorkBuddy** 用 `streamlit run frontend\app.py` 按点击路径点验四块 UI 并复跑 `pytest tests -q`（当前应为 `93 passed`）、确认 `backend/data/relationinsight.db` 仍为 0 行；**Cursor** 对照 `PRIVACY.md` 复核免责声明与数据来源提示文案。
 
+## T-007 一键删除与同意记录 — 2026-09-22
+
+### 负责工具
+- 主责：**Codex**（`backend/privacy.py` 实现、`backend/main.py` 接口接线、`frontend/app.py` 同意与删除入口接线、离线单测）
+- 协作：**Cursor**（同意文案与 `PRIVACY.md` §1.3 逐字核对、删除范围与残留检查口径）；**WorkBuddy**（复跑 `pytest tests -q`、比对删除前后 `backend/data/relationinsight.db` 行数与文件大小、按点击路径点验 UI）
+
+### 修改文件
+- `backend/privacy.py`（新增）：同意文案唯一来源 `CONSENT_STATEMENT` / `CONSENT_STATEMENT_VERSION="v0.1-2026-09-21"` / `CONSENT_STATEMENT_SOURCE="PRIVACY.md §1.3"`；范围枚举 `SCOPE_BOTH_PARTIES` / `SCOPE_SELF_ONLY`；`record_consent` / `revoke_consent` / `load_consents` / `has_valid_consent` / `require_consent`（有效同意 = `granted=1 AND revoked_at IS NULL`）；`delete_conversation` / `delete_all_data`（单事务有序删除 → `VACUUM` → 清理 `-wal`/`-shm`/`-journal` → 字节级残留检查 → 追加 JSON 审计行）；`mask_for_model()` 复用 `llm.deepseek.mask_text`（脱敏正则不重复实现，符合 `ARCHITECTURE.md` §8）
+- `backend/main.py`（修改）：新增 `POST /conversations/{id}/consent`、`DELETE /conversations/{id}`、`DELETE /data`；`POST /conversations/{id}/analyze` **前置**同意闸门（无有效同意 → `403 no_consent`，在调用管道之前就拒绝）；`app.state.db_path` / `audit_path` / `llm_client` 可注入（供离线单测，生产仍走 `db.DB_PATH`）；`GET /health` 语义不变
+- `frontend/app.py`（修改）：同意勾选框接线 `POST /conversations/{id}/consent`（文案逐字取自 `privacy.CONSENT_STATEMENT`，不自行发挥）+ 范围单选；「删除本会话」按钮（需勾选确认框）；左侧栏「⚙️ 设置 · 危险操作（清空全部本地数据）」需二次确认；删除后展示回执（各表行数 / `vacuumed` / 残留是否干净）与 `PRIVACY.md` §2.3「删不掉的部分」说明
+- `tests/test_privacy.py`（新增）：**28 个离线用例**（`tmp_path` 临时库 + `FakeDeepSeekClient` + `RELATIONINSIGHT_API_BASE` 指向不可达端口，零网络）
+- `ARCHITECTURE.md`（修改）：§0 追加「2026-09-22 追加冻结（T-007 轮拍板）」表；§4.7 同意文案逐字 `PRIVACY.md` §1.3 与「有效同意」口径；§7 删除范围（按会话为主 + 设置页危险操作 + 二次确认）与实现约定（`confirm=true` 必填、删除顺序、`VACUUM`、残留检查只报文件名与命中数、同意闸门 403）；§9 记 0.6
+- `TASKS.md`（修改）：T-007 总表与明细「当前状态」改「完成」，补实现记录与遗留问题，修订记录 0.8
+- `HANDOFF.md`（本记录）
+- **未改动**：`backend/db.py`、`backend/schema.sql`、`backend/parser.py`、`backend/llm/*`、`backend/pipeline/*`、`requirements.txt`、`.gitignore`（T-007 未新增依赖）
+- **未触碰**：`ACCEPTANCE.md`（含使用者本人尚未提交的改动）
+- **未污染数据**：`backend/data/relationinsight.db` 仍为 7 张表 0 行，且未生成 `backend/data/deletion_audit.jsonl`（单测把审计路径注入到 `tmp_path`）
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 启动后端（T-007 新接口）
+cd C:\Users\17352\Desktop\RelationInsight\backend
+.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+#   POST   /conversations/{id}/consent        勾选同意 → 写 consents
+#   POST   /conversations/{id}/analyze        无有效同意 → 403 no_consent
+#   DELETE /conversations/{id}?confirm=true   按会话删除
+#   DELETE /data?confirm=true                 清空全部本地数据（危险）
+#   GET    /health
+
+# 启动前端（同意勾选写 consents + 「删除本会话」+ 设置页危险操作）
+cd C:\Users\17352\Desktop\RelationInsight
+backend\.venv\Scripts\python.exe -m streamlit run frontend/app.py
+
+# 离线自测（无需网络、无需 API Key）
+backend\.venv\Scripts\python.exe -m pytest tests -q
+```
+`confirm` 缺省为 `false`，缺参返回 `400 confirmation_required` —— 二次确认在 API 层强制，不只靠 UI。
+
+### 测试结果
+（2026-09-22 本机实测：Python 3.12.4；`pytest tests -q` → **`121 passed in 13.57s`**（T-006 后基线 93 + 本次新增 28）。全部离线：`tmp_path` 临时库 + `FakeDeepSeekClient`，零网络请求、零真实 API 调用。）
+
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| 验收 ① 无有效同意不得调用分析管道 | 通过 | `POST /conversations/{id}/analyze` 在 `require_consent` 处即返回 **403** `kind=no_consent`；用 monkeypatch 监视 `pipeline.analyze_conversation_from_db`，断言**调用次数 0** 且 `analyses` 行数不变；撤回（写 `revoked_at`）后同样 403；UI 侧 `btn_analyze` 未勾选时 `disabled=True` |
+| 验收 ② 删除后业务表与同意表无该范围行 | 通过 | `DELETE /conversations/conv-1?confirm=true` 后 `evidence` / `analyses` / `profile_versions` / `messages` / `persons` / `consents` / `conversations` 该会话行数**逐表为 0**；同库另一个会话 `conv-2` 各表行数**逐表不变**（未误删） |
+| 验收 ③ WAL/临时文件不含明文残留 | 通过 | 删除前对全部 `body` 采集 needle（≥ 6 字符、上限 200 条）；删除后 `VACUUM` + `PRAGMA wal_checkpoint(TRUNCATE)` + 清理 `-wal`/`-shm`/`-journal`；对库文件做**字节级**扫描 → `residual.clean=true`、`hits={}`，报告只含文件名与命中数、不含原文；`journal_mode=WAL` 场景单独覆盖 |
+| 验收 ④ 操作可审计且不记原文 | 通过 | 每次删除追加一行 JSON 审计（`event` / `deleted_at` / `scope` / 各表行数 / `vacuumed` / `residual_clean`），`note="audit only: no plaintext recorded"`；断言审计文件与回执 `to_dict()` 中**不含**任何原文 needle |
+| 同意文案逐字一致 | 通过 | 断言 `privacy.CONSENT_STATEMENT` == `PRIVACY.md` §1.3 引用行原文；接口回执 `statement.text` 与之相等，`statement.source == "PRIVACY.md §1.3"` |
+| 同意落库字段最小化 | 通过 | `consents` 行恰好 7 列（`id` / `conversation_id` / `granted` / `scope` / `note` / `created_at` / `revoked_at`）；`note` 只含 `statement_version=v0.1-2026-09-21`，无原文 |
+| scope 与文案版本校验 | 通过 | 非法 scope → 400 `invalid_scope`；过期 `statement_version` → 400 `stale_statement`；`self_only` 记录不能顶替 `both_parties_informed` 校验 |
+| 删除闸门与错误码 | 通过 | 非法 / 未知 `conversation_id` → 400 / 404；`confirm` 缺失 → 400 `confirmation_required`（API 层强制二次确认）；重复删除同一会话 → 404 |
+| 删除回执内容 | 通过 | 回执含 `deleted_rows` / `total_rows` / `vacuumed` / `temp_files_removed` / `residual.clean` / `disclosures`（`PRIVACY.md` §2.3 三条说明） |
+| `DELETE /data` 全局清空 | 通过 | 单事务清空 7 张表 + `VACUUM`；`confirm` 缺失 → 400；UI 侧「设置 · 危险操作」需先勾选确认框才可点击 |
+| UI 双重确认（`AppTest`） | 通过 | 未勾选时 `btn_submit_consent` / `btn_analyze` / `btn_delete_conversation` / `btn_delete_all` 全部 `disabled=True`；勾选「删除本会话」确认框后方可点击；「清空全部本地数据」需在设置页另行确认 |
+| 日志不落原文 | 通过 | `caplog` 断言日志中不含原文；删除日志只含 `scope` / `deleted_at` / 行数 / 残留干净标记 |
+| 真实 DeepSeek API | 未测 | 属 T-008；本次全部离线 |
+| T-008 集成与验收 | 未测 | 属后续任务 |
+
+### 遗留问题
+- **撤回同意 vs 删除同意行**：现实现为「`revoke_consent` 只写 `revoked_at`（保留审计痕迹）」+「删除会话 / 清库时 `consents` 行随同删除」。`PRIVACY.md` §2.1 未明说撤回后是否保留该行，**需人工确认**。
+- **删除后是否保留空库结构**：当前实现保留 7 张表结构、只清空行（不回删 `schema.sql` 定义）。**需人工确认**。
+- **同意撤销后重授权**：同会话再次 `POST /consent` 会新增一行（旧的 `revoked_at` 行保留），有效同意取最新一行；是否改为一会话一行（UPSERT）待定。
+- **`DELETE /data` 无口令保护**：二次确认只在 UI 勾选 + `confirm=true` 参数层面；`PRIVACY.md` §6 是否加简单口令待定。
+- **未成年人 18 岁标准**：`PRIVACY.md` §4.1 的判定口径未定，本任务未实现任何年龄校验。
+- **DeepSeek 隐私政策 URL**：`PRIVACY.md` §5 需补正式链接；本任务的免责声明只引用文案，不含 URL。
+- **残留检查边界**：扫描覆盖库文件与 `-wal`/`-shm`/`-journal`；**不覆盖**文件系统级快照 / 备份 / SSD 磨损层，已在回执 `disclosures` 中如实说明。
+- **`app.state` 注入路径**：单测通过 `app.state.db_path` / `audit_path` / `llm_client` 注入，生产路径仍是 `db.DB_PATH`；两者一致性未做启动期断言（`/health` 返回 `database_path`，可作 T-008 联调核对点）。
+- **审计文件本身不加密**：`deletion_audit.jsonl` 只记时间与行数、无原文，但未加密也未随 `DELETE /data` 一并删除（当前实现会连带清理该文件外的数据；是否清审计留待确认）。
+
+### 下一步
+- 建议下一任务：**T-008 集成与验收**（`ACCEPTANCE.md` 全「必须」项 + 端到端样例 ≥ 70 条，以覆盖「1 个完整批 + 余数批」与追加消息增量）。
+- 阻塞项：无。
+- 需人工确认：① 撤回同意是否保留 `consents` 行；② 删除后是否保留空库结构；③ `PRIVACY.md` §4.1 未成年人标准、§5 DeepSeek 政策 URL、§6 是否加口令。
+- 交接指向：T-008 交 **Cursor**（对照 `ACCEPTANCE.md` 出具结论）；**WorkBuddy** 执行手工项并复跑 `pytest tests -q`（当前应为 `121 passed`）、确认 `backend/data/relationinsight.db` 仍为 0 行且未生成审计文件；**Codex** 修复阻塞缺陷。
+
 ---
 
 ## 修订记录
@@ -557,3 +635,4 @@ backend\.venv\Scripts\python.exe -m pytest tests -q
 | 0.4 | 2026-09-22 | 追加 T-004 交接记录；2026-09-22 拍板同步进 ARCHITECTURE.md（person_id 冻结 / conversations 建表 / response_format / 重试 / 脱敏范围） |
 | 0.5 | 2026-09-22 | 追加 T-005 交接记录；T-005 轮拍板同步进 ARCHITECTURE.md（§4.5 `speaker_role` 对 `dyad.*` 确认为真实说话人 / §6 批次幂等键与追加消息不重算既有批次 / §8 证据不合法保持「丢弃 + 记录」）；TASKS.md T-005 状态改「完成」、T-004 补实现记录与遗留问题 |
 | 0.6 | 2026-09-22 | 追加 T-006 交接记录；T-006 轮拍板同步进 ARCHITECTURE.md（§6 余数批「原地长大」维持现状 + UI 顶部常显当前覆盖消息数与最新画像版本号）、TASKS.md（T-005 遗留问题标「已确认」、T-006 状态改「完成」、修订记录 0.7） |
+| 0.7 | 2026-09-22 | 追加 T-007 交接记录；T-007 轮拍板同步进 `ARCHITECTURE.md`（§7 删除范围＝「按会话删除为主」+ 设置页「清空全部本地数据」危险操作与二次确认；§4.7 同意文案严格按 `PRIVACY.md` §1.3 落地、不自行发挥）；`TASKS.md` T-007 状态改「完成」并补实现记录与遗留问题、修订记录 0.8 |

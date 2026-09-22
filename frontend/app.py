@@ -5,7 +5,9 @@
 1. **不启动 FastAPI 也能演示**：③ 画像卡片、④ 证据列表读 `frontend/fixtures/mock_profile.json`；
    ① 导入预览、② A/B 标记只用本进程内存里的示例文本 + `backend/parser.py`（纯函数，不碰数据库）。
 2. 证据行展示 `message_id` + **脱敏后** quote（策略 α，见 `ARCHITECTURE.md` §4.5）。
-3. 顶部有同意勾选框：原型阶段只存本地 session state；联调勾选后写入 `consents`（T-007）。
+3. 顶部有同意勾选框：文案**逐字取自 `PRIVACY.md` §1.3**（引用 `backend/privacy.py` 常量，不复制改写）；
+   勾选后可 `POST /conversations/{id}/consent` 写入 `consents`；未勾选时「开始分析」按钮禁用（PRIVACY §1.1）。
+   T-007 另加：主区「删除本会话」、设置页「清空全部本地数据」——两者都必须二次确认（PRIVACY.md §2.2）。
 4. **不做诊断式标题**：全部文案为「行为倾向 / 可能与相处模式有关」，不出现人格标签、不做心理诊断、
    不提供操控或读心建议。
 
@@ -14,16 +16,23 @@
     cd C:\\Users\\17352\\Desktop\\RelationInsight
     backend\\.venv\\Scripts\\python.exe -m streamlit run frontend/app.py
 
-本页不写数据库、不调用模型：真正的分析与写库在 T-004/T-005，接线属 T-008。
+本页**不直接读写数据库**：同意写入 / 分析 / 删除都走后端 HTTP API（`RELATIONINSIGHT_API_BASE`，默认
+`http://127.0.0.1:8000`）。后端离线时自动降级为只读演示——① ② ③ ④ 四块仍可用（缓存结果 + 内存解析），
+删除与写库动作会明确提示「未连接后端」。真实模型调用与端到端联调仍属 T-008。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote as urlquote
+from urllib.request import Request, urlopen
 
 import streamlit as st
 
@@ -34,6 +43,10 @@ REPO_ROOT = FRONTEND_DIR.parent
 BACKEND_DIR = REPO_ROOT / "backend"
 FIXTURE_PATH = FRONTEND_DIR / "fixtures" / "mock_profile.json"
 DEFAULT_CONVERSATION_ID = "conv-demo-0001"
+
+#: 后端 API 基址（T-007 接线用；默认本机 127.0.0.1，见 `ARCHITECTURE.md` §8「绑定默认 127.0.0.1」）。
+API_BASE = os.environ.get("RELATIONINSIGHT_API_BASE", "http://127.0.0.1:8000").rstrip("/")
+API_TIMEOUT_SECONDS = 3.0
 
 #: 左侧预览用示例文本（演示 ① ② 两块）：63 条可解析消息 + 3 个空行 + 4 个错误行。
 #: 内容纯属虚构；手机号 / 邮箱 / 银行卡号是占位样例，仅用于演示策略 α 脱敏。
@@ -132,6 +145,110 @@ except ImportError as exc:  # pragma: no cover - 仅环境不完整时触发
     )
     st.stop()
 
+try:
+    from privacy import (  # noqa: F401  (T-007：同意书文案唯一来源，前端不复制改写)
+        CONSENT_STATEMENT,
+        CONSENT_STATEMENT_SOURCE,
+        CONSENT_STATEMENT_VERSION,
+        SCOPE_BOTH_PARTIES,
+        SCOPE_SELF_ONLY,
+        deletion_disclosures,
+    )
+
+    PRIVACY_SOURCE = "backend/privacy.py（T-007；文案逐字取自 PRIVACY.md §1.3）"
+except ImportError as exc:  # pragma: no cover - 仅环境不完整时触发
+    st.error(f"无法导入 `backend/privacy.py`：{exc}")
+    st.stop()
+
+DELETION_DISCLOSURES = tuple(deletion_disclosures())
+SCOPE_LABELS = {
+    SCOPE_BOTH_PARTIES: "双方知情同意（both_parties_informed）",
+    SCOPE_SELF_ONLY: "仅分析我自己（self_only）",
+}
+
+# ------------------------------------------------------------------ 后端 API 客户端（T-007）
+
+
+@dataclass(frozen=True)
+class ApiResult:
+    """一次后端调用的结果；`error` 只含状态码/异常类型，**不含**聊天原文。"""
+
+    ok: bool
+    status: int | None
+    payload: Any = None
+    error: str | None = None
+
+
+def api_request(method: str, path: str, *, payload: Mapping[str, Any] | None = None) -> ApiResult:
+    """调用后端（标准库 `urllib`，同步、短超时）。离线时返回 `ok=False`，绝不抛到界面上。"""
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = Request(f"{API_BASE}{path}", data=body, method=method)
+    request.add_header("Accept", "application/json")
+    if body is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:  # noqa: S310 - 固定本机基址
+            raw = response.read().decode("utf-8")
+            return ApiResult(True, int(response.status), json.loads(raw) if raw else None)
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(raw)
+        except json.JSONDecodeError:
+            detail = {"detail": raw}
+        return ApiResult(False, int(exc.code), detail, f"HTTP {exc.code}")
+    except (URLError, TimeoutError, OSError) as exc:
+        return ApiResult(False, None, None, f"未连接后端 {API_BASE}（{type(exc).__name__}）")
+
+
+def describe_failure(result: ApiResult) -> str:
+    """把失败翻译成一句人话（不回显原文；后端 `detail.message` 也不含原文）。"""
+    detail = result.payload.get("detail") if isinstance(result.payload, Mapping) else None
+    if isinstance(detail, Mapping):
+        kind = detail.get("kind") or "error"
+        message = detail.get("message") or ""
+        return f"{result.error or ''} · {kind}：{message}".strip(" ·")
+    if isinstance(detail, str) and detail:
+        return f"{result.error or ''} · {detail}".strip(" ·")
+    return result.error or "未知错误"
+
+
+def perform_deletion(key: str, path: str, *, label: str) -> None:
+    """执行删除（总是带 `confirm=true` 二次确认）并把**无原文回执**存入 session state。"""
+    result = api_request("DELETE", f"{path}?confirm=true")
+    receipts = st.session_state.setdefault("deletion_receipts", {})
+    if result.ok and isinstance(result.payload, Mapping):
+        receipts[key] = result.payload
+        st.success(str(result.payload.get("message") or f"已删除{label}"))
+    else:
+        receipts.pop(key, None)
+        st.error(f"删除未执行（{label}）：{describe_failure(result)}")
+
+
+def render_deletion_receipt(key: str) -> None:
+    """渲染删除回执：时间 + 范围 + 各表行数（**不**回显原文）。"""
+    receipts = st.session_state.get("deletion_receipts") or {}
+    receipt = receipts.get(key) if isinstance(receipts, Mapping) else None
+    if not isinstance(receipt, Mapping):
+        return
+    with st.container(border=True):
+        st.markdown(f"**删除回执** · 时间 `{receipt.get('deleted_at')}` · 范围 `{receipt.get('scope')}`")
+        rows = [{"表": name, "删除行数": count} for name, count in (receipt.get("deleted_rows") or {}).items()]
+        if rows:
+            st.dataframe(rows, hide_index=True)
+        residual = receipt.get("residual") or {}
+        st.caption(
+            f"VACUUM：{receipt.get('vacuumed')} · 残留检查：扫描 {len(residual.get('scanned_files') or [])} 个文件 / "
+            f"{residual.get('checked_needles')} 个原文片段 → 命中 {residual.get('hits')} 次"
+            f"（命中文件：{residual.get('hit_files') or '无'}）"
+        )
+        st.caption(
+            f"审计文件：`{receipt.get('audit_path')}`（只记时间 / 范围 / 行数，不记原文）· "
+            f"临时文件已清理：{receipt.get('temp_files_removed') or '无'}"
+        )
+        st.caption("回执与日志**均不含聊天原文**；删除成功后本页不保留任何原文副本。")
+
+
 # ------------------------------------------------------------------ 工具函数
 
 
@@ -226,6 +343,21 @@ with st.sidebar:
             "- 可一键删除会话数据（T-007）。"
         )
 
+    st.divider()
+    with st.expander("⚙️ 设置 · 危险操作（清空全部本地数据）"):
+        st.caption(f"后端 API：`{API_BASE}`")
+        st.caption(
+            "**清空全部本地数据**会删除本机所有会话在 conversations / persons / messages / analyses / "
+            "evidence / profile_versions / consents 的全部行，随后 `VACUUM` 并清理 WAL 临时文件。"
+            "按 `PRIVACY.md` §2.2，该危险操作只放在设置页，**必须二次确认**。"
+        )
+        for line in DELETION_DISCLOSURES:
+            st.caption(f"- {line}")
+        delete_all_ack = st.checkbox("我理解不可恢复：清空本机全部数据", key="delete_all_ack")
+        if st.button("清空全部本地数据", key="btn_delete_all", disabled=not delete_all_ack):
+            perform_deletion("all_data", "/data", label="清空全部本地数据")
+        render_deletion_receipt("all_data")
+
 # ------------------------------------------------------------------ 顶部：覆盖数 / 版本号 / 同意勾选
 
 snapshot = load_snapshot()
@@ -260,20 +392,117 @@ st.info(
     f"v{snapshot.get('version')}）。两处都不写数据库。"
 )
 
+st.markdown("#### ① 同意（PRIVACY.md §1.3）")
 consent_left, consent_right = st.columns([3, 2])
 with consent_left:
     consent_granted = st.checkbox(
-        "我已阅读并同意：只分析我主动提供的文本，用于**行为倾向归纳**（非诊断、非操控建议）",
+        "我已阅读并同意以下同意书（勾选后才可提交同意 / 开始分析）",
         key="consent_granted",
     )
+    with st.container(border=True):
+        st.markdown(f"> {CONSENT_STATEMENT}")
+    st.caption(
+        f"同意书版本 `{CONSENT_STATEMENT_VERSION}` · 唯一来源：`{PRIVACY_SOURCE}`（`{CONSENT_STATEMENT_SOURCE}`）。"
+        "落库只写四项：时间 / 会话 ID / 同意范围（枚举）/ 文案版本号——不写聊天原文、姓名、证件号（PRIVACY §1.2）。"
+    )
 with consent_right:
-    if consent_granted:
-        st.success("已勾选同意（原型：只存本地 session state）。")
-    else:
-        st.warning("未勾选同意：联调阶段（T-007/T-008）不得调用分析管道、不得写 `consents`。")
-st.caption(
-    "同意落地路径：勾选 → `POST /conversations/{id}/consent` → `consents(granted=1)`（属 T-007；本页只演示勾选框）"
-)
+    consent_scope = st.radio(
+        "同意范围（PRIVACY.md §1.2 枚举）",
+        options=[SCOPE_BOTH_PARTIES, SCOPE_SELF_ONLY],
+        format_func=lambda value: SCOPE_LABELS.get(value, value),
+        key="consent_scope",
+    )
+    if st.button(
+        "提交同意并写入 consents",
+        key="btn_submit_consent",
+        disabled=not consent_granted,
+        help="未勾选同意时按钮禁用（PRIVACY.md §1.1）",
+    ):
+        consent_result = api_request(
+            "POST",
+            f"/conversations/{urlquote(conversation_id, safe='')}/consent",
+            payload={
+                "granted": True,
+                "scope": consent_scope,
+                "statement_version": CONSENT_STATEMENT_VERSION,
+            },
+        )
+        if consent_result.ok and isinstance(consent_result.payload, Mapping):
+            st.session_state["consent_record"] = consent_result.payload
+            st.success(
+                f"已写入 `consents`：{consent_result.payload.get('created_at')} · "
+                f"scope={consent_result.payload.get('scope')}"
+            )
+        else:
+            st.warning(
+                f"未写入 `consents`（{describe_failure(consent_result)}）。"
+                "后端未启动时本页只能做离线演示，勾选状态不会落库。"
+            )
+    consent_record = st.session_state.get("consent_record")
+    if isinstance(consent_record, Mapping):
+        st.caption(
+            f"最近一次同意：`{consent_record.get('consent_id')}` · {consent_record.get('created_at')} · "
+            f"scope={consent_record.get('scope')} · 文案版本 {consent_record.get('statement_version')}"
+        )
+    if not consent_granted:
+        st.warning("未勾选同意：**已禁用分析入口**（PRIVACY.md §1.1「未同意禁止调用分析管道」）。")
+
+st.markdown("#### ② 分析（先过同意闸门）")
+analyze_left, analyze_right = st.columns([2, 3])
+with analyze_left:
+    if st.button(
+        "开始分析（先验同意闸门）",
+        key="btn_analyze",
+        disabled=not consent_granted,
+        help="无有效同意时按钮禁用；后端也会返回 403 no_consent",
+    ):
+        analyze_result = api_request(
+            "POST",
+            f"/conversations/{urlquote(conversation_id, safe='')}/analyze",
+            payload={"merge_profile": True},
+        )
+        if analyze_result.ok and isinstance(analyze_result.payload, Mapping):
+            st.session_state["analyze_result"] = analyze_result.payload
+            st.success(str(analyze_result.payload.get("message") or "分析完成"))
+        else:
+            st.session_state.pop("analyze_result", None)
+            st.error(f"分析未执行：{describe_failure(analyze_result)}")
+with analyze_right:
+    st.caption(
+        "闸门在后端：`POST /conversations/{id}/analyze` 先查 `consents`（有效同意 = `granted=1` 且 `revoked_at IS NULL`），"
+        "无有效同意返回 `403 no_consent`，**不触碰分批管道与模型客户端**；按钮禁用只是 UI 层阻止。"
+    )
+    analyzed = st.session_state.get("analyze_result")
+    if isinstance(analyzed, Mapping):
+        st.caption(
+            f"最近一次分析：status=`{analyzed.get('status')}` · 批次 {analyzed.get('batch_count')} · "
+            f"analyses {analyzed.get('analyses_written')} 行 · evidence {analyzed.get('evidence_written')} 行 · "
+            f"版本 v{(analyzed.get('profile') or {}).get('version', '—')}"
+        )
+
+st.markdown("#### ③ 删除本会话（不可恢复）")
+with st.expander(f"删除会话 `{conversation_id}` 的本地数据", expanded=False):
+    st.caption(
+        "删除范围：该会话在 conversations / persons / messages / analyses / evidence / profile_versions / consents "
+        "的全部行（含 `evidence.quote` 等原文副本）；随后 `VACUUM` 并清理 `-wal` / `-shm` / `-journal`；"
+        "回执与日志只记时间 / 范围 / 行数，**不记原文**。"
+    )
+    for line in DELETION_DISCLOSURES:
+        st.caption(f"- {line}")
+    delete_conversation_ack = st.checkbox(
+        "我理解不可恢复（这是二次确认，PRIVACY.md §2.2）", key="delete_conversation_ack"
+    )
+    if st.button(
+        "删除本会话",
+        key="btn_delete_conversation",
+        disabled=not delete_conversation_ack,
+    ):
+        perform_deletion(
+            "conversation",
+            f"/conversations/{urlquote(conversation_id, safe='')}",
+            label=f"会话 {conversation_id}",
+        )
+    render_deletion_receipt("conversation")
 
 # ------------------------------------------------------------------ 解析（内存，不写库）
 
@@ -448,5 +677,12 @@ st.caption(
 )
 st.caption(
     "数据默认只存本机；调用模型前按策略 α 对手机号 / 邮箱 / 身份证号 / 银行卡号脱敏；"
-    "可一键删除会话数据（T-007）。后端联调（写库、同意落库、真实模型调用）属 T-008。"
+    "「删除本会话」与设置页「清空全部本地数据」均需二次确认，删除后 `VACUUM` 并做残留检查（T-007）。"
+    "真实模型调用与端到端联调属 T-008。"
 )
+with st.expander("删除**删不掉**的部分（PRIVACY.md §2.3，必须披露）"):
+    for line in DELETION_DISCLOSURES:
+        st.markdown(f"- {line}")
+    st.caption(
+        "删除成功后本应用给出无原文回执（时间 + 范围 + 各表行数 + 残留检查结论），并追加一条同样无原文的审计记录。"
+    )

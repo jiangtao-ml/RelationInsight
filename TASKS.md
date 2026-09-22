@@ -25,7 +25,7 @@
 | T-004 | 分批分析管道（每 50 条一批，输出 JSON 画像） | Codex · Cursor（prompt 与 schema） | 已入库消息；T-003 客户端 | 批次 `analyses` + `evidence` 行 | T-002, T-003 | 见下方 T-004 | 完成 |
 | T-005 | 长期画像增量更新（新证据不覆盖旧结论，保留版本） | Codex · Cursor（合并规则） | 历史 `profile_versions` + 新批次分析 | 新版本画像；旧版本只读保留 | T-004 | 见下方 T-005 | 完成 |
 | T-006 | Streamlit 前端原型（模拟数据：导入、A/B 标记、画像卡片、证据列表） | Codex · Cursor（信息架构）· WorkBuddy（界面点验） | 模拟 JSON；UI 线框文字 | `app.py`（或 `frontend/`）可演示四块界面 | 无（可与后端并行） | 见下方 T-006 | 完成 |
-| T-007 | 一键删除与同意记录功能 | Codex · Cursor（隐私条款落地） | `PRIVACY.md`；会话/人物 ID | 同意写入；删除 API + UI；残留检查脚本 | T-001, T-006 | 见下方 T-007 | 未开始 |
+| T-007 | 一键删除与同意记录功能 | Codex · Cursor（隐私条款落地） | `PRIVACY.md`；会话/人物 ID | 同意写入；删除 API + UI；残留检查脚本 | T-001, T-006 | 见下方 T-007 | 完成 |
 | T-008 | 集成与验收 | Cursor（主导）· Codex（修缺陷）· WorkBuddy（按清单执行） | `ACCEPTANCE.md`；已实现 T-001–T-007 | 验收记录；已知问题列表；是否达标结论 | T-001–T-007 | 见下方 T-008 | 未开始 |
 
 ---
@@ -149,14 +149,18 @@
 | 字段 | 内容 |
 |------|------|
 | 负责工具 | **Codex** API + DB 级联删除；**Cursor** 对照 `PRIVACY.md`；**WorkBuddy** 删除前后对比文件大小/行数 |
-| 输入 | `consent` 记录需求；会话或数据库范围（**需人工确认：** 删整个库还是按 `conversation_id`） |
+| 输入 | `consent` 记录需求；删除范围（**已确认 2026-09-22：** 以「按会话删除」（`DELETE /conversations/{id}`）为主，「清空全部本地数据」作为设置页危险操作并需二次确认） |
 | 输出 | `POST /conversations/{id}/consent`（勾选写入 `consents`）；删除 API + UI；残留检查脚本 |
 | 依赖 | T-001；UI 入口依赖 T-006 |
 | 验收标准 | ① 无有效同意不得调用分析管道；② 删除后五张业务表及同意表无该范围行；③ WAL/临时文件不含明文残留（尽力：重建 SQLite 或 `VACUUM`）；④ 操作可审计（记下删除时间，**不**记下原文） |
-| 当前状态 | 未开始 |
+| 当前状态 | 完成 |
 
 **已确认（v0.1）：** 同意机制为 UI 勾选框，勾选后写入 `consents`。无勾选不得分析。  
-**假设：** MVP 单用户可“清空全部本地数据”。**需人工确认：** 是否保留空库结构；删除后是否保留无原文审计行。
+**已确认（2026-09-22 T-007 轮拍板）：** 删除范围以「按会话删除」（`DELETE /conversations/{id}`）为主，「清空全部本地数据」作为危险操作放在设置页且需二次确认；同意文案**严格按 `PRIVACY.md` §1.3 落地、不自行发挥**（唯一来源 `backend/privacy.py` 的 `CONSENT_STATEMENT` / `CONSENT_STATEMENT_VERSION="v0.1-2026-09-21"`，落库只写时间 / 会话 ID / scope 枚举 / 文案版本号）。**实现取舍（仍待人工确认）：** 删除后保留空库结构（只清行）；撤回同意保留 `revoked_at` 行。  
+
+**实现记录（2026-09-22）：** 新增 `backend/privacy.py`（同意文案唯一来源 + 有效同意判定 `granted=1 AND revoked_at IS NULL` + 七表有序删除（`evidence` → `analyses` → `profile_versions` → `messages` → `persons` → `consents` → `conversations`，schema 无 `ON DELETE CASCADE` 故手工按序）+ `VACUUM` + 清理 `-wal`/`-shm`/`-journal` + 字节级残留检查（只报文件名与命中数）+ 只记时间与行数的 JSON 审计 `deletion_audit.jsonl`）；`backend/main.py` 新增 `POST /conversations/{id}/consent`、`DELETE /conversations/{id}`、`DELETE /data`，并把 `POST /conversations/{id}/analyze` 前置同意闸门（无有效同意 → `403 no_consent`，**调用管道前**即拒绝）；`frontend/app.py` 接线同意写入 `consents`、「删除本会话」按钮、设置页「清空全部本地数据」二次确认与删除回执展示；`tests/test_privacy.py` 新增 **28 个离线用例**（`tmp_path` 临时库 + `FakeDeepSeekClient`，零网络）；`ARCHITECTURE.md` §0/§4.7/§7/§9 同步拍板。复跑 `pytest tests -q` → **`121 passed`**。
+
+**遗留问题（2026-09-22）：** ① 撤回同意保留 `revoked_at` 行 vs 删除该行，待人工确认；② 删除后保留空库结构（只清行）待人工确认；③ 同一会话重复授权会新增 `consents` 行（有效同意取最新一行），是否改为一会话一行（UPSERT）待定；④ `DELETE /data` 无口令保护（仅 UI 勾选 + `confirm=true`）；⑤ 残留检查不覆盖文件系统快照 / 备份 / SSD 磨损层；⑥ 审计文件不加密、`DELETE /data` 是否连带清理未定；⑦ `PRIVACY.md` §4.1 未成年人标准、§5 DeepSeek 政策 URL 未定。
 
 ---
 
@@ -199,3 +203,4 @@ WorkBuddy 在 T-001、T-006、T-007、T-008 必须参与运行验证。
 | 0.5 | 2026-09-22 | T-004 完成（总表与明细状态改「完成」）；拍板落地：person_id 冻结、conversations 建表、解析错误行与重复导入策略区分、response_format / 重试 / 超时确认、脱敏范围不扩展 |
 | 0.6 | 2026-09-22 | T-005 完成（总表与明细状态改「完成」）；T-004 补「幂等键 = batch_index / 追加消息不重算既有批次」实现记录与遗留问题（不加 sample_size 列、不加续跑入口）；拍板落地：speaker_role 对 `dyad.*` 写真实说话人、证据不合法保持「丢弃 + 记录」 |
 | 0.7 | 2026-09-22 | T-006 完成（总表与明细状态改「完成」并补实现记录）；T-005 遗留问题标「已确认」：`quote` 截断 80 字符维持现状、`profile_versions` 并发不加锁；拍板落地：余数批「原地长大」维持现状并在 UI 顶部提示（见 `ARCHITECTURE.md` §6） |
+| 0.8 | 2026-09-22 | T-007 完成（总表与明细「当前状态」改「完成」并补实现记录与遗留问题）；T-007 明细「输入」「假设」中的待确认项据 2026-09-22 拍板改为「已确认」；拍板落地：删除范围以「按会话删除」为主 + 设置页「清空全部本地数据」危险操作与二次确认、同意文案严格按 `PRIVACY.md` §1.3 落地、不自行发挥（见 `ARCHITECTURE.md` §7 / §4.7） |
