@@ -1,8 +1,16 @@
 -- RelationInsight v0.1 schema (sync sqlite3)
--- Core: persons, messages, analyses, evidence, profile_versions
+-- Core: conversations, persons, messages, analyses, evidence, profile_versions
 -- Privacy: consents (UI checkbox)
 
 PRAGMA foreign_keys = ON;
+
+-- 会话主表（ARCHITECTURE.md 4.2，2026-09-22 拍板创建；T-007 级联删除的根）
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deleted')),
+    created_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS persons (
     id TEXT PRIMARY KEY,
@@ -72,6 +80,7 @@ CREATE TABLE IF NOT EXISTS consents (
     revoked_at TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_conversations_status ON conversations (status);
 CREATE INDEX IF NOT EXISTS idx_persons_conversation ON persons (conversation_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id);
 CREATE INDEX IF NOT EXISTS idx_messages_person ON messages (person_id);

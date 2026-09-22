@@ -22,7 +22,7 @@
 | T-001 | 搭建 FastAPI + SQLite 项目骨架 | Codex（实现）· Cursor（目录与接口约定）· WorkBuddy（环境验证） | 本看板；`ARCHITECTURE.md` 表结构 | 可启动的 FastAPI 应用、SQLite 文件、健康检查接口、依赖清单 | 无 | 见下方 T-001 | 完成 |
 | T-002 | 文本解析器：解析 A/B 说话人，生成 `message_id` | Codex · Cursor（格式规格） | 样例聊天文本；说话人规则 | `parser` 模块；`Message` 列表；解析错误报告 | T-001 | 见下方 T-002 | 完成 |
 | T-003 | DeepSeek API 客户端封装 | Codex · Cursor（请求/响应 JSON Schema） | API 基址、模型名、Key 环境变量 | `DeepSeekClient`；超时/重试/错误类型；假客户端用于测试 | T-001 | 见下方 T-003 | 完成 |
-| T-004 | 分批分析管道（每 50 条一批，输出 JSON 画像） | Codex · Cursor（prompt 与 schema） | 已入库消息；T-003 客户端 | 批次 `analyses` + `evidence` 行 | T-002, T-003 | 见下方 T-004 | 未开始 |
+| T-004 | 分批分析管道（每 50 条一批，输出 JSON 画像） | Codex · Cursor（prompt 与 schema） | 已入库消息；T-003 客户端 | 批次 `analyses` + `evidence` 行 | T-002, T-003 | 见下方 T-004 | 完成 |
 | T-005 | 长期画像增量更新（新证据不覆盖旧结论，保留版本） | Codex · Cursor（合并规则） | 历史 `profile_versions` + 新批次分析 | 新版本画像；旧版本只读保留 | T-004 | 见下方 T-005 | 未开始 |
 | T-006 | Streamlit 前端原型（模拟数据：导入、A/B 标记、画像卡片、证据列表） | Codex · Cursor（信息架构）· WorkBuddy（界面点验） | 模拟 JSON；UI 线框文字 | `app.py`（或 `frontend/`）可演示四块界面 | 无（可与后端并行） | 见下方 T-006 | 未开始 |
 | T-007 | 一键删除与同意记录功能 | Codex · Cursor（隐私条款落地） | `PRIVACY.md`；会话/人物 ID | 同意写入；删除 API + UI；残留检查脚本 | T-001, T-006 | 见下方 T-007 | 未开始 |
@@ -60,7 +60,9 @@
 
 **已确认（2026-09-22 冻结）`message_id` 算法：** `message_id = uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`，`seq` 从 **0** 开始、按导入顺序递增；同一 `(conversation_id, seq)` 必得同一 ID。**重复导入策略：拒绝整批**——写库前先做全批存在性检查，只要有一个 `message_id` 已存在，整批不写入，并在错误报告中列出冲突 ID 与来源行号（不做部分导入、不静默跳过）。完整约定见 `ARCHITECTURE.md` §6。
 
-**假设（T-002 实现，需人工确认）：** ① `person_id` 以 `uuid5(NAMESPACE_URL, f"person:{conversation_id}:{role}")` 确定性生成（会话内 A / B 各一人），该算法未在规格中冻结；② 文本中含解析错误行时，仍导入可解析成功的行并在报告中列出错误（仅 `message_id` 冲突才拒绝整批）；③ `A: ` 冒号后正文为空视为解析错误。
+**已确认（2026-09-22 拍板）：** ① `person_id` = `uuid5(NAMESPACE_URL, f"person:{conversation_id}:{role}")`，已冻结并写入 `ARCHITECTURE.md` §4.1；② 文本中含解析错误行时，**仍导入可解析成功的行**并在报告中列出错误（含行号与原因）。该策略与「`message_id` 冲突则拒绝整批」是**两条不同规则**，见 `ARCHITECTURE.md` §6。
+
+**假设（未冻结）：** ③ `A: ` 冒号后正文为空视为解析错误。
 
 ---
 
@@ -72,10 +74,12 @@
 | 输入 | `DEEPSEEK_API_KEY`；`base_url`（**假设** `https://api.deepseek.com`）；模型名 **`deepseek-chat`**；OpenAI 兼容接口 |
 | 输出 | `DeepSeekClient.analyze_batch(messages, schema) -> dict`；`FakeDeepSeekClient`；统一错误（401/429/5xx/超时） |
 | 依赖 | T-001 |
-| 验收标准 | ① Key 只从环境变量读取；② 使用 OpenAI 兼容 Chat Completions，`model=deepseek-chat`；JSON 约束方式若 API 支持则用 `response_format`（细节 **需人工确认**）；③ 单测不打真实网，Fake 客户端可返回合法 schema；④ 日志不打印完整聊天原文（可打 `message_id` 与条数）；⑤ 发给模型的 content 为策略 α 脱敏后文本 |
+| 验收标准 | ① Key 只从环境变量读取；② 使用 OpenAI 兼容 Chat Completions，`model=deepseek-chat`；JSON 约束方式用 `response_format={"type": "json_object"}`（2026-09-22 已确认，见 `ARCHITECTURE.md` §8）；③ 单测不打真实网，Fake 客户端可返回合法 schema；④ 日志不打印完整聊天原文（可打 `message_id` 与条数）；⑤ 发给模型的 content 为策略 α 脱敏后文本 |
 | 当前状态 | 完成 |
 
 **已确认（v0.1）：** 模型 `deepseek-chat`；OpenAI 兼容接口。
+
+**已确认（2026-09-22 拍板）：** 请求带 `response_format={"type": "json_object"}`（服务端不支持时归为 `bad_response`，不做自动降级）；重试最多 **3** 次尝试、**1.5s 指数退避**，仅对 429 / 5xx / 超时 / 连接失败重试（401 立即失败）；单次超时 **60s**；脱敏**不扩展**，MVP 仅手机号 / 邮箱 / 身份证号 / 银行卡号 4 类。详见 `ARCHITECTURE.md` §8。
 
 ---
 
@@ -88,10 +92,11 @@
 | 输出 | 每批一条 `analyses` 记录（JSON 画像片段）+ 多条 `evidence`（含 `message_id`、**脱敏后** `quote`、对应结论键） |
 | 依赖 | T-002, T-003 |
 | 验收标准 | ① 100 条消息产生 2 个完整批 + 处理余数规则明确；② 每条结论含证据 `message_id` 列表；写库时 ID 必须存在，`quote` 须等于该条原文经同一正则脱敏后的摘录（策略 α）；③ 缺少证据的结论不入库或标 `unverified`；④ 消息总数 &lt; 20 时管道拒绝正式分析并返回「样本不足」；⑤ 调用模型前对 `body` 脱敏，**不得**把未脱敏原文发到 API |
-| 当前状态 | 未开始 |
+| 当前状态 | 完成 |
 
-**假设：** 余数 &lt; 50 的最后一批仍调用一次模型，但样本量写入该批元数据。  
-**需人工确认：** 不足 20 条是整段拒绝，还是允许“预览草稿”。宪章默认：**拒绝正式画像**。
+**已确认（2026-09-22 拍板）：** 余数 &lt; 50 的最后一批**仍调用一次模型**，该批条数作为 `sample_size` 写入该批 `result_json.warnings`（不丢弃、不并入上一批）。  
+**已确认（2026-09-22）：** 总数 &lt; 20 条**拒绝正式分析**，返回「样本不足」，**不调用模型、不写库**（不做「预览草稿」）。恰好 20 条放行（边界为 `>=`）。  
+**实现记录：** `backend/pipeline/`（`batch.py` / `prompt.py` / `run.py`）；`analysis_id = uuid5(NAMESPACE_URL, f"analysis:{conversation_id}:{batch_index}")` 确定性生成，已存在的批次跳过不重算（幂等）；某批抛 `DeepSeekError` 时停止后续批次并保留已写入的批次。
 
 ---
 
@@ -173,3 +178,4 @@ WorkBuddy 在 T-001、T-006、T-007、T-008 必须参与运行验证。
 | 0.2 | 2026-09-22 | T-001 完成；总表与 T-001 明细的「当前状态」改为完成 |
 | 0.3 | 2026-09-22 | Python 基线改 3.12.4；message_id 冻结为方案 A（重复导入拒绝整批）；T-002/T-003 实现与单测完成 |
 | 0.4 | 2026-09-22 | 总表与 T-002/T-003 明细「当前状态」改为完成（交接记录见 HANDOFF.md） |
+| 0.5 | 2026-09-22 | T-004 完成（总表与明细状态改「完成」）；拍板落地：person_id 冻结、conversations 建表、解析错误行与重复导入策略区分、response_format / 重试 / 超时确认、脱敏范围不扩展 |

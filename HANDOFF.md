@@ -318,6 +318,91 @@ set DEEPSEEK_MODEL=deepseek-chat
 - 需人工确认：① `response_format` 是否按当前假设使用；② 重试次数/退避是否需要调整；③ 脱敏是否扩展到 QQ/微信号；④ `evidence_message_ids` 是否要求严格限定在本批（当前默认仅警告）。
 - 交接指向：T-004 交 **Codex** 实现；**Cursor** 冻结 system prompt 与批次元数据；**WorkBuddy** 复跑 `pytest tests -q` 与（拿到 Key 后）一次真实 API 冒烟。
 
+## T-004 分批分析管道 — 2026-09-22
+
+### 负责工具
+- 主责：**Codex**（实现与自测）
+- 协作：**Cursor**（system prompt 与批次元数据定稿、§5 schema 对照）；**WorkBuddy**（复跑测试、核对库文件行数）
+
+### 修改文件
+- `backend/pipeline/__init__.py`（新增）：包出口；对外只有 `analyze_conversation` / `analyze_conversation_from_db` / `plan_batches` 三个名字
+- `backend/pipeline/batch.py`（新增）：`BATCH_SIZE=50`、`MIN_MESSAGES_FOR_ANALYSIS=20`、`Batch` / `BatchPlan` / `plan_batches()` / `InsufficientSampleError`
+- `backend/pipeline/prompt.py`（新增）：`PROMPT_VERSION="1.0"`、`SYSTEM_PROMPT`（禁止诊断 / 人格标签 / 读心 / 操控 / 编造证据）、`build_system_prompt()`
+- `backend/pipeline/run.py`（新增）：`load_messages`、`filter_profile`（证据双闸门）、`persist_batch`（1 行 `analyses` + N 行 `evidence` 同事务）、`analyze_conversation`、`analyze_conversation_from_db`、`PipelineReport`
+- `tests/test_pipeline.py`（新增）：**34 例**，全程离线（`llm.FakeDeepSeekClient` + pytest `tmp_path`），不碰真实 API、不碰 `backend/data/relationinsight.db`
+- `backend/schema.sql`（修改）：新增 `conversations` 表（§4.2 拍板）+ 索引 `idx_conversations_status`；表头注释更新
+- `backend/db.py`（修改）：`REQUIRED_TABLES` 加入 `"conversations"`（`/health` 现检查 7 张表）
+- `ARCHITECTURE.md`（修改）：§0 追加 2026-09-22 冻结表；§4.1 `person_id` 生成方式；§4.2 `conversations` 改为「已确认创建」；§4.5 补 `speaker_role` 读法；§6 区分「解析错误行」与「`message_id` 冲突」两条策略；§8 补 `response_format` / 重试 / 超时 / 脱敏范围；§9 记 0.3
+- `TASKS.md`（修改）：T-004 总表与明细状态改「完成」；T-002 / T-003 明细中已拍板的「需人工确认」改为「已确认」
+- `HANDOFF.md`（本记录）
+- **未改动**：`backend/main.py`、`backend/parser.py`、`backend/llm/*`、`requirements.txt`（`openai` / `pytest` / `pytest-mock` 已在 T-003 加入）
+- **未污染数据**：`backend/data/relationinsight.db` 仍为 7 张表 0 行（仅多出空的 `conversations` 表）
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 全量单测（离线、零网络）
+cd C:\Users\17352\Desktop\RelationInsight
+backend\.venv\Scripts\python.exe -m pytest tests -q
+
+# 只跑本任务
+backend\.venv\Scripts\python.exe -m pytest tests/test_pipeline.py -q
+
+# 健康检查（7 张表齐全，missing_tables 为空）
+cd C:\Users\17352\Desktop\RelationInsight\backend
+.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+#   http://127.0.0.1:8000/health
+
+# 管道调用（Fake 客户端：不联网、不花钱）
+#   from pipeline import analyze_conversation_from_db
+#   from llm import FakeDeepSeekClient
+#   report = analyze_conversation_from_db("conv-1", FakeDeepSeekClient())
+#   print(report.summary())   # [completed] conversation=conv-1 messages=100 batches=2 analyses=2 ...
+#   print(report.message)     # 面向使用者的一句话（含「样本不足」等）
+```
+
+### 测试结果
+（2026-09-22 本机实测：Python 3.12.4；`pytest tests -q` → **`70 passed in 3.14s`**，其中本任务 34 例、T-003 25 例、T-002 11 例。全程零网络请求、零真实 API 调用。）
+
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| 验收 ① 100 条 → 2 个完整批 | 通过 | `[50, 50]`；`seq` 区间 `(0,49)` / `(50,99)`；`message_id_from/to` 与库内首尾一致；`message_ids` 不重不漏 |
+| 验收 ① 余数规则 | 通过 | 120 条 → `[50, 50, 20]`；51 条 → `[50, 1]`；余数批 `is_remainder=True`、独立成批、再调一次模型，`sample_size=20` 写入该批 `result_json.warnings` |
+| 验收 ② 写库时校验证据 ID 存在 | 通过 | 编造 ID 不入库；跨会话 ID 被丢弃；本批真实存在的 ID 照常入库；`evidence.message_id` 全部 ∈ `messages` |
+| 验收 ③ 缺证据的结论不入库 | 通过 | `evidence_message_ids=[]` 的结论不落 `result_json`；报告 `dropped_count` 与 `warnings` 留痕；证据全被剔除的结论整条丢弃（reason=`REASON_NO_EVIDENCE`） |
+| 验收 ④ 总数 < 20 拒绝正式分析 | 通过 | 0 / 1 / 19 条抛 `InsufficientSampleError`（文案含「样本不足」）；19 条走管道 → `status=insufficient_sample`、`call_count=0`、`analyses`/`evidence` 均无行；恰好 20 条放行 |
+| 验收 ⑤ 调用前脱敏 | 通过 | 手机号 / 邮箱 / 身份证 / 银行卡 4 个原值在发往模型的文本中零命中，占位符命中；`messages.body` 仍存原文；`evidence.quote == normalise_quote(mask_text(body))` |
+| 系统提示词约束 | 通过 | 含「禁止 / 诊断 / 人格 / 读心 / 操控」，点名禁止「自恋型 / NPD / 依恋」，要求 `evidence_message_ids`、严格 JSON、§5 骨架；管道确实把它传给客户端 |
+| 幂等（重复运行） | 通过 | 第二次运行 `analyses_written=0`、`batches_skipped=3`、`call_count=0`，旧行不被覆盖 |
+| 失败即停 | 通过 | 401 → `status=failed`、`error_kind=auth_error`、只调用 1 次；非法 JSON → `bad_response`，管道不崩 |
+| 日志隐私 | 通过 | DEBUG 级 `caplog` 中正文与 4 类原值零命中，会话 ID 仍可见 |
+| 错误摘要隐私 | 通过 | `report.message` / `failures` / `warnings` 不含正文与原值 |
+| 说话人映射 | 通过 | 从 `persons` 读 `person_id → A/B`；显式 `person_roles` 可覆盖（seq=0 由 A 改判为 B） |
+| `GET /health`（回归） | 通过 | 7 张表齐全、`missing_tables: []`，`status: ok`（手工在 venv 内实测） |
+| 真实 DeepSeek API 端到端 | 未测 | 无 Key，本任务不打真实网；`response_format` 与真机 429/超时行为需联网验证 |
+| `POST /conversations` 建行 | 未测 | 属 API 层（T-007 / T-008）；本模块只读 `persons`，不写 `conversations` |
+| T-005 增量合并 | 未测 | 属 T-005；本任务只做「每批一条 `analyses`」，不合并成 `profile_versions` |
+
+### 遗留问题
+- `speaker_role` 采用「该条证据消息的**真实说话人**」，`dyad.*` 证据也写 `A`/`B` 而非 NULL。已写入 `ARCHITECTURE.md` §4.5 并标注**需人工确认**（原草案只写「A/B」，未规定 dyad 情形）。单测名与 docstring 已按此读法固定。
+- 管道把**原文** `MessageDTO` 交给 `client.analyze_batch()`，脱敏发生在客户端内部（T-003 契约，验收 ⑤ 由此满足）；`evidence.quote` 另用 `client.mask_batch()` 的输出生成，故 quote 与「实际发出去的文本」逐字一致，而与「库内原文」不同——这是策略 α 的设计意图，不是缺陷。
+- `evidence.quote` 折叠空白并截断到 80 字符（`QUOTE_MAX_CHARS`）：因只取前缀，仍满足 §4.5「脱敏后文本的子串」要求；要看完整原文请回查 `messages.body`。
+- 管道以 `strict_evidence_ids=False` 调客户端：越界 / 编造证据被降级为「丢弃 + 记录」而非整批失败，便于一次拿到完整报告。若将来要求「证据不合法即整批失败」，需改成 `True`（T-003 已支持）。
+- 失败即停：某批抛 `DeepSeekError` 后不再尝试后续批次，已写入的批次保留，`status=failed`。当前没有「跳过失败批继续跑」的续跑入口。
+- 幂等键为 `(conversation_id, batch_index)`：同一会话**追加**消息后，`batch_index=0` 仍是原来那 50 条、不会重算，只有新出现的尾批会被分析。「消息数变化后旧批是否要重算」留给 T-005 决策。
+- 错误摘要直接内嵌 `DeepSeekError` 文本，依赖 T-003 的保证「异常文本不含聊天原文」；本模块未做二次清洗。
+- 批次样本量只写进 `result_json.warnings`；`analyses` 表没有独立 `sample_size` 列（`seq_from` / `seq_to` 可推导）。若 UI 需要直接展示，建议 v1.1 加列。
+- 「有 `messages` 但无 `conversations` 行」在当前版本是预期状态（导入器不隐式建会话行），不是数据损坏。
+- 本次交接未改动任何 T-005+ 的代码。
+
+### 下一步
+- 建议下一任务：**T-005 长期画像增量更新**（把 2 批 `analyses` 合并成 `profile_versions` v1，并冻结 `trait_key` 与冲突合并规则）。
+- 阻塞项：无。
+- 需人工确认：① `speaker_role` 对 `dyad` 证据的读法（§4.5）；② 追加消息后是否需要重算既有批次（幂等键为 `batch_index`）；③ 是否给 `analyses` 加独立 `sample_size` 列；④ 失败批次是否需要「续跑」入口；⑤「证据不合法即整批失败」是否要成为默认。
+- 交接指向：T-005 交 **Codex**；**Cursor** 定 `trait_key` 与合并冲突策略；**WorkBuddy** 复跑 `pytest tests -q`（当前应为 `70 passed`）并确认 `backend/data/relationinsight.db` 仍为 0 行。
+
 ---
 
 ## 修订记录
@@ -327,3 +412,4 @@ set DEEPSEEK_MODEL=deepseek-chat
 | 0.1 | 2026-09-21 | 模板初稿 |
 | 0.2 | 2026-09-22 | 追加 T-001 交接记录 |
 | 0.3 | 2026-09-22 | T-001 记录补「更正」小节（Python 基线 / Git / message_id 决策落地）；追加 T-002、T-003 交接记录 |
+| 0.4 | 2026-09-22 | 追加 T-004 交接记录；2026-09-22 拍板同步进 ARCHITECTURE.md（person_id 冻结 / conversations 建表 / response_format / 重试 / 脱敏范围） |

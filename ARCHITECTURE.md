@@ -14,7 +14,18 @@
 | 脱敏 | **策略 α**：`messages.body` 存原文；调用模型前正则脱敏；`evidence.quote` 存脱敏后文本 |
 | 同意 | UI 勾选框；勾选后写入 **`consents` 表** |
 
-仍待确认项见各节标注「需人工确认」（如是否建 `conversations` 表、`person_id` 生成方式、全局清空等）。  
+**2026-09-22 追加冻结（拍板）：**
+
+| 项 | 决策 |
+|----|------|
+| `person_id` 生成 | **冻结**：`uuid5(NAMESPACE_URL, f"person:{conversation_id}:{role}")`（见 §4.1） |
+| `conversations` 表 | **确认创建**（宪章五表之外，见 §4.2） |
+| 解析错误行 | **导入成功行 + 报错**；仅 `message_id` 冲突才拒绝整批（见 §6） |
+| `response_format` | **确认使用** `{"type": "json_object"}`（见 §8） |
+| 重试 / 超时 | **确认**：3 次尝试、1.5s 指数退避、60s 超时（见 §8） |
+| 脱敏范围 | **不扩展**：MVP 仅 4 类（手机号 / 邮箱 / 身份证 / 银行卡，见 §8） |
+
+仍待确认项见各节标注「需人工确认」（如全局清空、时区展示）。  
 
 ---
 
@@ -122,18 +133,39 @@ flowchart LR
 
 **假设：** 一个 `conversation` 恰好两人。群聊拒绝导入。
 
-**需人工确认：** 是否单独建 `conversations` 表。建议 MVP 增加如下表，避免 conversation_id 无主。
+**已冻结（2026-09-22）`person_id` 生成方式：**
 
-### 4.2 `conversations`（建议，宪章五表之外）
+```python
+person_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"person:{conversation_id}:{role}"))
+```
+
+- 与 §6 的 `message_id` 同族：`NAMESPACE_URL` + 确定性字符串，不含随机成分，可复现。
+- `role` 仅 `A` / `B`（大写）；`conversation_id` 不做任何规范化（不 `strip`、不改大小写）。
+- 同一 `(conversation_id, role)` 必得同一 `person_id`：重复导入或重建库都不会产生重复人物行。
+- `display_label` 与 `person_id` 无关，可随时改，不影响证据链。
+
+**已确认（2026-09-22）：** 单独建 `conversations` 表，见 §4.2。
+
+### 4.2 `conversations`（已确认创建 2026-09-22，宪章五表之外）
 
 | 列名 | 类型 | 约束 | 说明 |
 |------|------|------|------|
 | id | TEXT | PK | |
 | title | TEXT | | 用户起的会话名 |
 | created_at | TEXT | NOT NULL | |
-| status | TEXT | | `active` / `deleted` |
+| status | TEXT | NOT NULL DEFAULT `active` | `active` / `deleted`（CHECK 约束） |
 
-若为减少表数量，可将会话信息塞进 `persons.conversation_id` 无主外键。**需人工确认。**
+**已确认（2026-09-22 拍板）：创建该表。** 理由：T-007 一键删除需要一张「会话根」作为级联起点；否则 `conversation_id` 无主，删除范围无法表达。
+
+落地位置：`backend/schema.sql`（`CREATE TABLE conversations` + 索引 `idx_conversations_status`）、`backend/db.py` 的 `REQUIRED_TABLES`。
+
+实现与原草案的差异：
+
+- SQL 中 `status` 为 `TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted'))`，比本表草案更严（禁止空值与域外取值）。
+- 本表当前**无人写入**：`conversations` 行的创建属 API 层（`POST /conversations`，T-007/T-008 接线）；T-002 导入器只使用调用方传入的 `conversation_id` 字符串，不隐式建行。
+- 故「有 `messages` 但无 `conversations` 行」在当前版本是正常状态，不是数据损坏。
+
+**仍待人工确认：** 删除时物理删行还是仅置 `status='deleted'`（T-007 范围）。
 
 ### 4.3 `messages`
 
@@ -178,6 +210,8 @@ flowchart LR
 | created_at | TEXT | NOT NULL | |
 
 **已确认（v0.1）：** 策略 α。校验：`quote` 须能对应到该 `message_id` 的原文经同一套正则脱敏后的子串或全文（允许空白规范化）。禁止无 ID 的改写句单独作为证据。界面点证据时应同时能打开本地原文。
+
+**T-004 实现约定（2026-09-22）：** `speaker_role` 恒记录该条证据消息（`message_id`）的**真实说话人**，`dyad.*` 结论的证据也不例外（不置 NULL）。理由：UI 点开证据时可直接显示「谁说的」；「该结论不专属于某人」这层语义已由 `claim_key` 前缀 `dyad.` 表达。**需人工确认**此读法（本节原草案只写了「A/B」，未规定 dyad 情形）。
 
 ### 4.6 `profile_versions`
 
@@ -277,7 +311,16 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 - 冲突必须在错误报告中列出冲突的 `message_id` 及其来源行号，供使用者改 `conversation_id` 或另起会话。
 - 同一 `conversation_id` 下 `seq` 唯一，故 `seq` 冲突与 `message_id` 冲突等价。
 
-**需人工确认（尚未冻结）：** `person_id` 的生成方式（T-002 暂用同一 `uuid5` 配 `f"person:{conversation_id}:{role}"`）；`conversation_id` 由谁分配、是否单独建 `conversations` 表（见 4.2）。
+**已冻结（2026-09-22）：** `person_id` = `uuid5(NAMESPACE_URL, f"person:{conversation_id}:{role}")`（见 §4.1）；`conversations` 表创建（见 §4.2）。
+
+**两条策略不要混淆（均已冻结）：**
+
+| 情形 | 策略 | 理由 |
+|------|------|------|
+| 文本中有解析不出的行（非 `A: ` / `B: `） | **导入成功行 + 报错**：可解析的行照常写入；错误列表带行号与原因 | 用户可只修正那几行再导入，不必整批重来 |
+| 批内出现已存在的 `message_id` | **拒绝整批**：一个都不写，列出冲突 ID 与来源行号 | 半截导入会破坏 `seq` 连续性，使「第 N 批」的切片边界不再可信 |
+
+**仍待人工确认：** `conversation_id` 由谁分配（当前由调用方传入字符串；`POST /conversations` 未实现，属 T-007/T-008）。
 
 ---
 
@@ -307,10 +350,15 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 |----|------|
 | Python | 3.12.4 |
 | FastAPI | 同步路由与同步 `sqlite3` |
-| 模型 | `deepseek-chat`，OpenAI 兼容（`base_url` **假设** `https://api.deepseek.com`） |
-| API Key | 仅环境变量 `DEEPSEEK_API_KEY` |
+| 模型 | `deepseek-chat`，OpenAI 兼容；`base_url` 默认 `https://api.deepseek.com`（可用 `DEEPSEEK_BASE_URL` 覆盖） |
+| JSON 约束 | **已确认（2026-09-22）**：请求带 `response_format={"type": "json_object"}`；服务端若不支持，400 归一为 `bad_response`，**不做**自动降级 |
+| 重试 | **已确认（2026-09-22）**：最多 **3** 次尝试（首次 + 2 次重试），退避 **1.5s 指数**（1.5 → 3.0s）；仅对 429 / 5xx / 超时 / 连接失败重试，401 立即失败不重试 |
+| 超时 | **已确认（2026-09-22）**：单次请求 **60s** |
+| API Key | 仅环境变量 `DEEPSEEK_API_KEY`；不进日志、不进异常文本、不进仓库 |
+| 脱敏范围 | **已确认（2026-09-22）不扩展**：MVP 仅 4 类正则——手机号、邮箱、身份证号、银行卡号（策略 α）。QQ 号 / 微信号 / 详细地址 / 姓名 / 单位名暂不处理；若要扩展，在 T-007 的 `privacy` 模块统一，避免两处正则漂移 |
+| 脱敏时机 | 只在**调用模型前**对 message 文本脱敏；`messages.body` 始终存原文；`evidence.quote` 存脱敏后文本 |
 | 绑定 | FastAPI 默认 `127.0.0.1`（**假设**，防局域网误暴露） |
-| 日志 | 默认 info；body 明文不进日志 |
+| 日志 | 默认 info；body 明文不进日志，只打 `message_id` 与条数 |
 
 ---
 
@@ -321,3 +369,4 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 | 0.1 | 2026-09-21 | 启动初稿 |
 | 0.1-frozen | 2026-09-21 | 人工确认：Py3.11、同步 FastAPI、A/B 行格式、deepseek-chat、脱敏 α、consents 勾选 |
 | 0.2 | 2026-09-22 | Python 基线改为 3.12.4（与实测 venv 一致）；message_id 冻结为方案 A（uuid5） |
+| 0.3 | 2026-09-22 | 拍板落地：person_id 生成方式冻结（§4.1）；conversations 建表（§4.2）；区分「解析错误行」与「message_id 冲突」两条策略（§6）；response_format / 重试 / 超时确认（§8）；脱敏范围不扩展（§8）；补 §4.5 speaker_role 读法 |

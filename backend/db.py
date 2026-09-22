@@ -11,6 +11,7 @@ DB_PATH = DATA_DIR / "relationinsight.db"
 SCHEMA_PATH = BACKEND_DIR / "schema.sql"
 
 REQUIRED_TABLES = (
+    "conversations",
     "persons",
     "messages",
     "analyses",
