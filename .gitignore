@@ -1,0 +1,30 @@
+# ============================================================
+# RelationInsight 根目录忽略规则（PRIVACY.md §6）
+# 目的：密钥、聊天数据库、虚拟环境绝不入库
+# ============================================================
+
+# --- 密钥 ---
+.env
+.env.*
+!.env.example
+
+# --- 本地数据库与数据目录（原文只存在本机） ---
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# --- 编辑器 / 系统 ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
