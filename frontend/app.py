@@ -16,9 +16,21 @@
     cd C:\\Users\\17352\\Desktop\\RelationInsight
     backend\\.venv\\Scripts\\python.exe -m streamlit run frontend/app.py
 
-本页**不直接读写数据库**：同意写入 / 分析 / 删除都走后端 HTTP API（`RELATIONINSIGHT_API_BASE`，默认
-`http://127.0.0.1:8000`）。后端离线时自动降级为只读演示——① ② ③ ④ 四块仍可用（缓存结果 + 内存解析），
-删除与写库动作会明确提示「未连接后端」。真实模型调用与端到端联调仍属 T-008。
+本页**不直接读写数据库**：导入 / 同意 / 分析 / 画像读取 / 删除全部走后端 HTTP API
+（`RELATIONINSIGHT_API_BASE`，默认 `http://127.0.0.1:8000`）。后端离线时自动降级为只读演示——
+① ② 用内存解析（不写库），③ ④ 回退到 `frontend/fixtures/mock_profile.json`，写库动作明确提示「未连接后端」。
+
+T-008 接线（不改动 T-001–T-007 已冻结的接口契约）：
+
+| 界面动作 | 后端调用 |
+|----------|----------|
+| ①「导入到数据库」 | `POST /conversations/{id}/messages:import` |
+| 顶部「提交同意并写入 consents」 | `POST /conversations/{id}/consent`（T-007，已接线） |
+| ②「开始分析（先验同意闸门）」 | `POST /conversations/{id}/analyze`（T-007，已接线） |
+| ③ ④ 画像 / 证据 | `GET /conversations/{id}/profile`（**真实画像**；取不到才回退离线 fixture） |
+| ②「删除本会话」/ 设置页「清空全部本地数据」 | `DELETE ...?confirm=true`（T-007，已接线） |
+
+端到端自测使用 `FakeDeepSeekClient`（不调用真实 DeepSeek API）；最终验收由 WorkBuddy 按 `ACCEPTANCE.md` 执行。
 """
 
 from __future__ import annotations
@@ -213,16 +225,41 @@ def describe_failure(result: ApiResult) -> str:
     return result.error or "未知错误"
 
 
+def set_flash(level: str, text: str) -> None:
+    """把一条提示存进 session state，下次 rerun 渲染（`st.rerun()` 会丢掉当前这一轮的提示）。"""
+    st.session_state["flash"] = {"level": level, "text": text}
+
+
+def render_flash() -> None:
+    """渲染并清空上一步留下的提示。"""
+    flash = st.session_state.pop("flash", None)
+    if not isinstance(flash, Mapping):
+        return
+    text = str(flash.get("text") or "")
+    level = flash.get("level")
+    if level == "success":
+        st.success(text)
+    elif level == "warning":
+        st.warning(text)
+    elif level == "error":
+        st.error(text)
+    else:
+        st.info(text)
+
+
 def perform_deletion(key: str, path: str, *, label: str) -> None:
     """执行删除（总是带 `confirm=true` 二次确认）并把**无原文回执**存入 session state。"""
     result = api_request("DELETE", f"{path}?confirm=true")
     receipts = st.session_state.setdefault("deletion_receipts", {})
     if result.ok and isinstance(result.payload, Mapping):
         receipts[key] = result.payload
-        st.success(str(result.payload.get("message") or f"已删除{label}"))
+        set_flash("success", str(result.payload.get("message") or f"已删除{label}"))
     else:
         receipts.pop(key, None)
-        st.error(f"删除未执行（{label}）：{describe_failure(result)}")
+        set_flash("error", f"删除未执行（{label}）：{describe_failure(result)}")
+    # 删除会改变画像可见性：丢掉画像缓存后重跑，让 ③ ④ 重新读真实画像（或回退演示数据）。
+    invalidate_profile_cache()
+    st.rerun()
 
 
 def render_deletion_receipt(key: str) -> None:
@@ -254,8 +291,48 @@ def render_deletion_receipt(key: str) -> None:
 
 @st.cache_data(show_spinner=False)
 def load_snapshot() -> dict[str, Any]:
-    """读入演示画像（`frontend/fixtures/mock_profile.json`，符合 `ARCHITECTURE.md` §5 快照结构）。"""
+    """读入**离线演示**画像（`frontend/fixtures/mock_profile.json`，符合 `ARCHITECTURE.md` §5 快照结构）。"""
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+#: T-008：③ ④ 优先读后端真实画像（`GET /conversations/{id}/profile`），失败才回退 fixture。
+PROFILE_CACHE_PREFIX = "profile_payload::"
+PROFILE_SOURCE_API = "后端真实画像（`GET /conversations/{id}/profile`）"
+PROFILE_SOURCE_FIXTURE = "离线演示数据（`frontend/fixtures/mock_profile.json`）"
+
+
+def profile_cache_key(conversation_id: str) -> str:
+    return f"{PROFILE_CACHE_PREFIX}{conversation_id}"
+
+
+def fetch_profile(conversation_id: str, *, refresh: bool = False) -> ApiResult:
+    """读画像接口；结果缓存在 session state，避免每次 rerun 都打后端（离线时也不会反复等超时）。"""
+    key = profile_cache_key(conversation_id)
+    if refresh or key not in st.session_state:
+        st.session_state[key] = api_request(
+            "GET", f"/conversations/{urlquote(conversation_id, safe='')}/profile"
+        )
+    cached = st.session_state.get(key)
+    return cached if isinstance(cached, ApiResult) else ApiResult(False, None, None, "未请求")
+
+
+def resolve_snapshot(conversation_id: str, *, refresh: bool = False) -> tuple[dict[str, Any], str, ApiResult]:
+    """返回 (快照, 来源说明, 最近一次请求结果)：真实画像优先，取不到则回退离线 fixture。"""
+    result = fetch_profile(conversation_id, refresh=refresh)
+    payload = result.payload if isinstance(result.payload, Mapping) else None
+    snapshot = payload.get("snapshot") if payload else None
+    if result.ok and isinstance(snapshot, Mapping):
+        return dict(snapshot), PROFILE_SOURCE_API, result
+    return load_snapshot(), PROFILE_SOURCE_FIXTURE, result
+
+
+def invalidate_profile_cache(conversation_id: str | None = None) -> None:
+    """丢掉画像缓存：写库动作后（导入 / 分析 / 删除）强制下次 rerun 重新拉真实画像。"""
+    for key in [
+        key for key in list(st.session_state.keys()) if str(key).startswith(PROFILE_CACHE_PREFIX)
+    ]:
+        if conversation_id is None or str(key) == profile_cache_key(conversation_id):
+            st.session_state.pop(key, None)
 
 
 def person_id_for(conversation_id: str, role: str) -> str:
@@ -360,7 +437,8 @@ with st.sidebar:
 
 # ------------------------------------------------------------------ 顶部：覆盖数 / 版本号 / 同意勾选
 
-snapshot = load_snapshot()
+#: ③ ④ 的数据来源（T-008）：优先真实后端画像，读不到才回退 T-006 的离线 fixture。
+snapshot, profile_source, profile_result = resolve_snapshot(conversation_id)
 show_all = bool(show_superseded)
 sections = snapshot_to_sections(snapshot, include_superseded=show_all)
 all_traits = [t for t in (snapshot.get("traits") or []) if isinstance(t, Mapping)]
@@ -375,21 +453,36 @@ st.caption(
     "本页只呈现**可观察到的行为倾向**与对应原文证据；不做心理诊断、不给人格标签、不推测对方想法、"
     "不提供操控建议。"
 )
+render_flash()
 
 top1, top2, top3 = st.columns([1, 1, 2])
 top1.metric("当前覆盖消息数", f"{int(snapshot.get('message_count') or 0)} 条")
 top2.metric("最新画像版本号", f"v{snapshot.get('version', '?')}")
-top3.metric("画像生成时间（演示数据）", str(snapshot.get("generated_at") or "—"))
+top3.metric("画像生成时间", str(snapshot.get("generated_at") or "—"))
+
+if profile_source == PROFILE_SOURCE_API:
+    st.success(
+        f"画像来源：{profile_source} · 会话 `{conversation_id}` · **v{snapshot.get('version')}** · "
+        f"快照 `{snapshot.get('schema_version')}`（只读；历史版本行不会被改写，见 §4.6）"
+    )
+else:
+    st.info(
+        f"画像来源：{profile_source} · 未读到真实画像（{describe_failure(profile_result)}）。"
+        "③ ④ 当前是**离线演示数据**；启动后端并走完「导入 → 同意 → 分析」后会自动切换为真实画像。"
+    )
+
+if st.button("刷新画像", key="btn_refresh_profile", help="重新调用 GET /conversations/{id}/profile"):
+    st.session_state.pop(profile_cache_key(conversation_id), None)
+    st.rerun()
 
 st.caption(
     "⚠️ 「覆盖消息数」= **已经进入画像**的消息条数，不等于你导入的全部消息："
     "不足 50 条的余数批在首次分析时即固定切片，之后追加的消息不会自动并入，也不会触发重算"
     "（`ARCHITECTURE.md` §6）。所以继续粘贴新消息时，这个数字会先**停住**，直到出现新的整批。"
 )
-st.info(
-    f"数据来源：① ② 用左侧示例文本在内存里实时解析（会话 `{conversation_id}`）；"
-    f"③ ④ 读 `frontend/fixtures/mock_profile.json`（演示会话 `{snapshot.get('conversation_id')}`，"
-    f"v{snapshot.get('version')}）。两处都不写数据库。"
+st.caption(
+    f"数据来源：① ② 用左侧文本在内存里实时解析（会话 `{conversation_id}`，不写库）；"
+    f"③ ④ 来源 = {profile_source}（快照会话 `{snapshot.get('conversation_id')}`，v{snapshot.get('version')}）。"
 )
 
 st.markdown("#### ① 同意（PRIVACY.md §1.3）")
@@ -463,10 +556,14 @@ with analyze_left:
         )
         if analyze_result.ok and isinstance(analyze_result.payload, Mapping):
             st.session_state["analyze_result"] = analyze_result.payload
-            st.success(str(analyze_result.payload.get("message") or "分析完成"))
+            set_flash("success", str(analyze_result.payload.get("message") or "分析完成"))
         else:
             st.session_state.pop("analyze_result", None)
-            st.error(f"分析未执行：{describe_failure(analyze_result)}")
+            set_flash("error", f"分析未执行：{describe_failure(analyze_result)}")
+        # 分析会写 analyses / evidence，并在 merge_profile 时追加新版本：丢掉画像缓存后重跑，
+        # 让 ③ ④ 立刻读到新版真实画像。
+        invalidate_profile_cache(conversation_id)
+        st.rerun()
 with analyze_right:
     st.caption(
         "闸门在后端：`POST /conversations/{id}/analyze` 先查 `consents`（有效同意 = `granted=1` 且 `revoked_at IS NULL`），"
@@ -548,12 +645,64 @@ with tab1:
     else:
         st.success("没有错误行：全部可解析。")
 
+    st.divider()
+    st.markdown("#### 写入数据库（T-008 接线）")
+    st.caption(
+        "`POST /conversations/{id}/messages:import`：把左侧文本按 T-002 规则解析后写入本机 `messages` 表"
+        "（需要时同时补 `conversations` / `persons` 行）。重复导入时 `message_id` 冲突 → **拒绝整批**（§6 方案 A），"
+        "整批一行都不写。**调用模型前的脱敏发生在分析阶段**，同意闸门只管分析入口（PRIVACY.md §1.1）。"
+    )
+    if st.button(
+        "导入到数据库",
+        key="btn_import",
+        disabled=not message_rows,
+        help="先把文本写进本机 SQLite；之后勾选同意才能开始分析",
+    ):
+        import_result = api_request(
+            "POST",
+            f"/conversations/{urlquote(conversation_id, safe='')}/messages:import",
+            payload={"text": chat_text},
+        )
+        st.session_state["import_result"] = {
+            "ok": import_result.ok,
+            "status": import_result.status,
+            "payload": import_result.payload if isinstance(import_result.payload, Mapping) else None,
+            "failure": None if import_result.ok else describe_failure(import_result),
+        }
+        if import_result.ok and isinstance(import_result.payload, Mapping):
+            set_flash("success", str(import_result.payload.get("message") or "已写入 messages"))
+        else:
+            set_flash("error", f"导入未执行：{describe_failure(import_result)}")
+        invalidate_profile_cache(conversation_id)
+        st.rerun()
+
+    import_outcome = st.session_state.get("import_result")
+    if isinstance(import_outcome, Mapping):
+        with st.container(border=True):
+            outcome_payload = import_outcome.get("payload")
+            if import_outcome.get("ok") and isinstance(outcome_payload, Mapping):
+                st.markdown(
+                    f"**最近一次导入** · status `{outcome_payload.get('status')}` · 写入 "
+                    f"{outcome_payload.get('inserted_count')} 条 · seq {outcome_payload.get('seq_from')}–"
+                    f"{outcome_payload.get('seq_to')} · 错误行 {len(outcome_payload.get('errors') or [])} 行 · "
+                    f"空行跳过 {outcome_payload.get('blank_lines_skipped')} 行"
+                )
+                error_rows = outcome_payload.get("errors") or []
+                if error_rows:
+                    st.dataframe(error_rows, hide_index=True)
+            else:
+                st.markdown(f"**最近一次导入** · 失败：{import_outcome.get('failure')}")
+                conflicts = outcome_payload.get("conflicts") if isinstance(outcome_payload, Mapping) else None
+                if conflicts:
+                    st.warning("冲突的 `message_id`（按 §6 方案 A，整批未写入）：")
+                    st.dataframe(conflicts, hide_index=True)
+
 # ------------------------------------------------------------------ ② A/B 标记
 
 with tab2:
     st.caption(
         "逐个确认说话人（另一种写法：把整段文本当作 A 或 B 发出）。这里的改动只影响**本页展示**：`person_id` 与证据行的 "
-        "`speaker_role` 会跟着变；写库接口是 `PATCH /messages/{id}/speaker`（T-008 接线），本页不改数据库。"
+        "`speaker_role` 会跟着变；写库接口 `PATCH /messages/{id}/speaker` 本轮 T-008 **未接线**，本页不改数据库。"
     )
     if not result.messages:
         st.session_state["speaker_overrides"] = {}
@@ -678,7 +827,8 @@ st.caption(
 st.caption(
     "数据默认只存本机；调用模型前按策略 α 对手机号 / 邮箱 / 身份证号 / 银行卡号脱敏；"
     "「删除本会话」与设置页「清空全部本地数据」均需二次确认，删除后 `VACUUM` 并做残留检查（T-007）。"
-    "真实模型调用与端到端联调属 T-008。"
+    "T-008 已完成前后端接线（导入 / 同意 / 分析 / 画像 / 删除）；端到端自测用 `FakeDeepSeekClient`，"
+    "**未调用真实 DeepSeek API**，最终验收由 WorkBuddy 按 `ACCEPTANCE.md` 执行。"
 )
 with st.expander("删除**删不掉**的部分（PRIVACY.md §2.3，必须披露）"):
     for line in DELETION_DISCLOSURES:

@@ -623,6 +623,91 @@ backend\.venv\Scripts\python.exe -m pytest tests -q
 - 需人工确认：① 撤回同意是否保留 `consents` 行；② 删除后是否保留空库结构；③ `PRIVACY.md` §4.1 未成年人标准、§5 DeepSeek 政策 URL、§6 是否加口令。
 - 交接指向：T-008 交 **Cursor**（对照 `ACCEPTANCE.md` 出具结论）；**WorkBuddy** 执行手工项并复跑 `pytest tests -q`（当前应为 `121 passed`）、确认 `backend/data/relationinsight.db` 仍为 0 行且未生成审计文件；**Codex** 修复阻塞缺陷。
 
+## T-008 集成与验收（集成部分） — 2026-09-22
+
+### 负责工具
+- 主责：**Codex**——前后端接线（`backend/main.py` 新增导入 / 画像接口与 CORS，`frontend/app.py` 改读真实画像并接线导入 / 刷新）与端到端自测
+- 协作：**Cursor**（`ACCEPTANCE.md` 口径与结论把关、接口契约不越界）；**WorkBuddy**（按 `ACCEPTANCE.md` 逐条手工验收、复跑 `pytest tests -q`、比对 `backend/data/relationinsight.db` 行数）
+- **本轮只做「集成 + 端到端自测」，不判验收通过**：是否达标由 **WorkBuddy / Cursor** 出具。
+
+### 修改文件
+- `backend/main.py`（修改）：新增 `POST /conversations/{id}/messages:import`（→ T-002 `parser.import_chat`；重复导入按 §6 方案 A **拒绝整批** → `409 duplicate_message_id` + `detail.conflicts`；响应不回显原文）与 `GET /conversations/{id}/profile`（读 T-005 快照，默认最新版 / `?version=N` 历史版，**只读**，无画像 → `404 no_profile`）；新增 `ImportRequest`、`_utc_now()`、`_ensure_conversation()`（`INSERT OR IGNORE` 补 `conversations` 主行）；`app = FastAPI(version="0.8.0")` + `CORSMiddleware`（`ALLOWED_ORIGINS = http://localhost:8501 / http://127.0.0.1:8501`）；**既有路由与 `app.state` 注入点（`db_path` / `audit_path` / `llm_client`）均未改动**
+- `frontend/app.py`（修改）：画像卡片改为**优先** `GET /conversations/{id}/profile`（`resolve_snapshot()`：取到就用真实画像，取不到才回退 `frontend/fixtures/mock_profile.json` 并提示失败原因）；新增「导入到数据库」按钮（调 `messages:import`，展示写入条数 / seq 区间 / 错误行表 / 冲突表）与「刷新画像」按钮；新增 `set_flash()` / `render_flash()` / `fetch_profile()` / `invalidate_profile_cache()`（导入 / 分析 / 删除后自动失效画像缓存）；② A/B 标记页注明 `PATCH /messages/{id}/speaker` **本轮未接线**；同意勾选与「删除本会话」沿用 T-007 接线（确认可用）
+- `TASKS.md`（修改）：T-008 总表与明细「当前状态」改「集成完成，待 WorkBuddy 验收」，补实现记录 / 自测结果 / 遗留问题；T-007 遗留问题 ①② 标「已确认」、未成年人标准 / DeepSeek URL / 口令三项移入 v1.1；修订记录 0.9
+- `HANDOFF.md`（本记录）
+- **未改动**：`backend/db.py`、`backend/schema.sql`、`backend/parser.py`、`backend/llm/*`、`backend/pipeline/*`、`backend/privacy.py`、`tests/**`、`requirements.txt`、`.gitignore`（T-008 未新增依赖、未新增测试文件）
+- **未触碰**：`ACCEPTANCE.md`（含使用者本人尚未提交的改动，工作区里原样保留，未编辑、未提交）
+- **未污染数据**：`backend/data/relationinsight.db` 仍 7 张表 0 行；自测全部跑在 `%TEMP%\relationinsight_t008_e2e\` 临时库上，临时脚本（`_e2e_*.py`）跑完已删，仓库根已无残留文件
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 1) 后端（T-008 新增两个接口）
+cd C:\Users\17352\Desktop\RelationInsight\backend
+.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+#   POST   /conversations/{id}/messages:import   纯文本 → 解析 → 写 messages（T-008 新增）
+#   GET    /conversations/{id}/profile           读画像快照，?version=N 读历史版（T-008 新增，只读）
+#   POST   /conversations/{id}/consent           T-007
+#   POST   /conversations/{id}/analyze           T-007（无有效同意 → 403 no_consent）
+#   DELETE /conversations/{id}?confirm=true      T-007
+#   DELETE /data?confirm=true                    T-007（危险操作）
+#   GET    /health
+
+# 2) 前端（画像自动改读后端；后端不可达时回退 mock_profile.json 只读演示）
+cd C:\Users\17352\Desktop\RelationInsight
+backend\.venv\Scripts\python.exe -m streamlit run frontend/app.py
+#   浏览器 http://localhost:8501
+#   后端地址可用环境变量覆盖：set RELATIONINSIGHT_API_BASE=http://127.0.0.1:8000（默认值即此）
+
+# 3) 离线回归（零网络、零真实 API）
+backend\.venv\Scripts\python.exe -m pytest tests -q
+
+# 4) 本轮端到端自测的复现方式（临时脚本，跑完即删；不落库到生产路径）
+#   服务端：起真实 uvicorn，但把存储与模型注入到临时位置：
+#     main.app.state.db_path    = <临时目录>\e2e.db
+#     main.app.state.audit_path = <临时目录>\deletion_audit.jsonl
+#     main.app.state.llm_client = llm.FakeDeepSeekClient()
+#     uvicorn.run(main.app, host="127.0.0.1", port=8011)
+#   客户端：用 streamlit.testing.v1.AppTest 驱动**真实页面**，环境变量
+#     RELATIONINSIGHT_API_BASE=http://127.0.0.1:8011
+#   点击顺序：导入到数据库 → 勾选同意并提交 → 分析并合并画像 → 重新渲染读画像 → 勾选确认并删除本会话
+```
+
+### 测试结果
+（2026-09-22 本机实测：Python 3.12.4；`pytest tests -q` → **`121 passed in 21.91s`**，与 T-007 基线一致、无回归。端到端自测全程离线：真实 `uvicorn` + 真实 Streamlit 页面 + **`FakeDeepSeekClient`**，**零真实 DeepSeek API 调用**。）
+
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| 回归 `pytest tests -q` | 通过 | `121 passed`（T-008 未新增测试文件，验证既有 121 条不被接线破坏） |
+| ① 服务健康 + CORS | 通过 | `GET /health` → 200、`status=ok`、`python=3.12.4`、7 张表齐；`Origin: http://localhost:8501` 与 `http://127.0.0.1:8501` 均回 `access-control-allow-origin`，`http://evil.example.com` **不回** ACAO；预检 `OPTIONS` → 200 且回显 `allow-methods` / `allow-headers` |
+| ② 同意闸门先于管道 | 通过 | 未同意时 `POST /conversations/conv-demo-0001/analyze` → **403 `no_consent`**，且该会话 `analyses` 仍 0 行 |
+| ③ 前端一键导入 63 条 | 通过 | 点「导入到数据库」→ `已写入 63 条消息（seq 0–62）；错误行 4 行未阻断导入`；库内 `conversations 1 / persons 2 / messages 63` |
+| ④ 同意勾选写入 `consents` | 通过 | 勾选 + 提交 → `已写入 consents：2026-09-22T08:50:49Z · scope=both_parties_informed`（1 行） |
+| ⑤ 分析 + 合并画像 | 通过 | 点「分析并合并画像」→ 2 批、`analyses` 2 行、`evidence` 12 行、`profile_versions` v1 |
+| ⑥ 画像卡片读**真实**画像 | 通过 | 新开页面渲染：`GET /conversations/conv-demo-0001/profile` → 200、`version=1`、`message_count=63`；顶部指标「当前覆盖消息数 63 条 / 最新画像版本号 v1」；来源提示为**后端真实画像**；traits：`A.request_style`（conf 0.50 / sample 32 / evidence 6）、`B.request_style`（conf 0.50 / sample 31 / evidence 6） |
+| ⑦ 一键删除（UI 二次确认） | 通过 | 勾选确认框 → 点「删除本会话」→ `已删除会话 conv-demo-0001 的本地数据（2026-09-22T08:50:50Z）：evidence 12、analyses 2、profile_versions 1、messages 63、persons 2、consents 1、conversations 1；VACUUM 已执行；残留检查通过（0 命中）` |
+| ⑧ 删除后无残留 | 通过 | 七表「该会话」与「全库」计数**全部 0**；`e2e.db` 及 `-wal` / `-shm` / `-journal` 字节级扫描：手机号 / 邮箱 / 身份证号 / 银行卡号 / 示例正文 / 会话 ID 命中数均为 **0** |
+| ⑨ 审计可追溯、不含原文 | 通过 | `deletion_audit.jsonl` 1 行：`event=delete`、`deleted_at`、`scope`、各表 `deleted_rows`、`total_rows`；**不含**聊天原文与任何 PII |
+| ⑩ 调用模型前脱敏 | 通过 | 63 条中 seq 28/30/44 的 `messages.body` 确含手机号 / 邮箱 / 银行卡号原文（只留本机）；走真实管道 + 记录型 Fake 客户端后，**发往模型的文本 PII 命中全为 False**，并出现 `[手机号] 1` / `[邮箱] 1` / `[银行卡号] 1`；入库 `evidence.quote`（12 行）同样无 PII |
+| ⑪ 脱敏会话删除后复检 | 通过 | 该会话七表计数全 0；库文件与 WAL 扫描 PII 命中 0 |
+| ⑫ 真实 DeepSeek API | **未测** | 按本轮要求只用 `FakeDeepSeekClient`；真实 API 冒烟与 `ACCEPTANCE.md` 逐条结论留给 WorkBuddy / Cursor |
+
+### 遗留问题
+- **`PATCH /messages/{id}/speaker` 未接线**：② A/B 标记页的「改说话人」目前只改页面展示，**不回写** `messages.person_id`。T-002 / T-007 未定义该接口，T-008 不新增契约；若验收要求「改完重新分析生效」，需先补契约。
+- **画像历史版本**：前端只读最新版；API 侧已支持 `?version=N`，UI 暂无版本选择器。
+- **`RELATIONINSIGHT_API_BASE` 未写入 `backend/.env.example`**：前端目前仅支持环境变量覆盖（本轮未新增依赖，也未改 `.env.example`）。
+- **CORS 只放行 8501**：换端口起 Streamlit 需改 `backend/main.py` 的 `ALLOWED_ORIGINS`（`ARCHITECTURE.md` §8 约定只放行本机原型）。
+- **画像缓存**：缓存在 `st.session_state`（键 `profile_payload::<conversation_id>`），导入 / 分析 / 删除后由代码主动失效；若库被别处改动，需点「刷新画像」。
+- **审计记会话 ID**：`deletion_audit.jsonl` 的 `scope` 是会话 ID（追溯需要，非原文）；若要求连 ID 也不记，需另行拍板。
+- 沿用 T-007 遗留问题：撤回同意保留 `revoked_at` 行、删除后保留空库结构 → **均已确认（2026-09-22）维持现状**；未成年人 18 岁标准 / DeepSeek 政策 URL / `DELETE /data` 口令 → **移入 v1.1**。
+
+### 下一步
+- 建议下一任务：**T-008 验收（不属 Codex）**——把 `ACCEPTANCE.md` 逐条结论交 **WorkBuddy**（手工项）并由 **Cursor** 出具是否通过；**Codex** 只在收到缺陷票后修阻塞项。
+- 阻塞项：无（集成路径已跑通；真实 DeepSeek API 未联调，属验收方可选手工项）。
+- 需人工确认：① 是否补 `PATCH /messages/{id}/speaker` 契约（否则 A/B 改标记不落库）；② 画像卡片是否需要历史版本选择器；③ `ACCEPTANCE.md` 中「真实 API 冒烟」是否列为 MVP 必须项。
+
 ---
 
 ## 修订记录
@@ -636,3 +721,4 @@ backend\.venv\Scripts\python.exe -m pytest tests -q
 | 0.5 | 2026-09-22 | 追加 T-005 交接记录；T-005 轮拍板同步进 ARCHITECTURE.md（§4.5 `speaker_role` 对 `dyad.*` 确认为真实说话人 / §6 批次幂等键与追加消息不重算既有批次 / §8 证据不合法保持「丢弃 + 记录」）；TASKS.md T-005 状态改「完成」、T-004 补实现记录与遗留问题 |
 | 0.6 | 2026-09-22 | 追加 T-006 交接记录；T-006 轮拍板同步进 ARCHITECTURE.md（§6 余数批「原地长大」维持现状 + UI 顶部常显当前覆盖消息数与最新画像版本号）、TASKS.md（T-005 遗留问题标「已确认」、T-006 状态改「完成」、修订记录 0.7） |
 | 0.7 | 2026-09-22 | 追加 T-007 交接记录；T-007 轮拍板同步进 `ARCHITECTURE.md`（§7 删除范围＝「按会话删除为主」+ 设置页「清空全部本地数据」危险操作与二次确认；§4.7 同意文案严格按 `PRIVACY.md` §1.3 落地、不自行发挥）；`TASKS.md` T-007 状态改「完成」并补实现记录与遗留问题、修订记录 0.8 |
+| 0.8 | 2026-09-22 | 追加 T-008（集成部分）交接记录：`backend/main.py` 新增 `messages:import` / `profile` 接口与 CORS(8501)、`frontend/app.py` 改读真实画像并接线导入与刷新、端到端自测（真实 uvicorn + 真实 Streamlit 页面 + `FakeDeepSeekClient`，零真实 API）；`TASKS.md` T-008 状态改「集成完成，待 WorkBuddy 验收」、T-007 遗留问题 ①② 标「已确认」、未成年人标准 / DeepSeek URL / 口令移入 v1.1、修订记录 0.9；**未判 `ACCEPTANCE.md` 通过** |

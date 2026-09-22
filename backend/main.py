@@ -13,6 +13,18 @@ T-007 新增内容
 | DELETE | `/conversations/{id}` | 按会话一键删除（主入口），必须 `?confirm=true`（验收 ②③④） |
 | DELETE | `/data` | 清空本机全部数据（**危险操作，只在设置页**），必须 `?confirm=true` |
 
+T-008 新增内容（集成接线，**不改动上面任何已冻结契约**）
+--------------------------------------------------------
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/conversations/{id}/messages:import` | 纯文本 → T-002 解析 → 写 `messages`（需要时补 `conversations` / `persons` 行） |
+| GET | `/conversations/{id}/profile` | 读 T-005 画像快照（默认最新版；`?version=N` 读历史版本；**只读**，不写库） |
+
+- `message_id` 冲突（重复导入）按 §6 已冻结的**方案 A（拒绝整批）**处理 → `409 duplicate_message_id`，
+  `detail.conflicts` 列出冲突 ID 与来源行号，整批一行不写。
+- 另加 CORS：只放行本机 Streamlit 原型（8501），不改变「默认绑定 127.0.0.1」的约定。
+- 新接口的响应体同样**不含聊天原文**：解析错误行只返回「行号 + 原因」。
+
 约定
 ----
 - 请求体 / 响应体**逐字不含**聊天原文（`PRIVACY.md` §4.2）；回执只含时间、范围、行数。
@@ -25,13 +37,15 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import privacy
-from db import DB_PATH, REQUIRED_TABLES, init_db, list_user_tables
+from db import DB_PATH, REQUIRED_TABLES, get_connection, init_db, list_user_tables
 from llm.deepseek import (
     ERROR_AUTH,
     ERROR_BAD_RESPONSE,
@@ -47,7 +61,22 @@ from llm.deepseek import (
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="RelationInsight", version="0.7.0")
+app = FastAPI(title="RelationInsight", version="0.8.0")
+
+#: T-008 CORS：只放行本机 Streamlit 原型（8501）。服务本身仍只绑 127.0.0.1（`ARCHITECTURE.md` §8），
+#: 因此这条中间件只是让浏览器里的 Streamlit 页面能跨端口访问同一台机器上的 API。
+ALLOWED_ORIGINS = (
+    "http://localhost:8501",
+    "http://127.0.0.1:8501",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(ALLOWED_ORIGINS),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 #: `DeepSeekError.kind` → HTTP 状态码（上游问题一律 5xx/429，配置问题 409）。
 _LLM_STATUS: dict[str, int] = {
@@ -75,6 +104,17 @@ class AnalyzeRequest(BaseModel):
     """`POST /conversations/{id}/analyze` 的请求体。"""
 
     merge_profile: bool = True
+
+
+class ImportRequest(BaseModel):
+    """`POST /conversations/{id}/messages:import` 的请求体（T-008）。
+
+    只收**纯文本**：整段聊天放在 `text` 里，由 T-002 解析器决定哪些行可解析；`title` 可选，
+    只写进 `conversations.title`，不参与分析。
+    """
+
+    text: str = ""
+    title: str | None = None
 
 
 # ---------------------------------------------------------------- 内部工具
@@ -124,6 +164,23 @@ def _consent_echo(record: privacy.ConsentRecord) -> dict:
     }
 
 
+def _utc_now() -> str:
+    """ISO-8601 UTC 字符串（与 `db` / `privacy` / `pipeline` 的写法一致）。"""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _ensure_conversation(conn, conversation_id: str, title: str | None = None) -> bool:
+    """确保 `conversations` 有该会话行（T-004 拍板建表）；`INSERT OR IGNORE`，返回是否新建。
+
+    T-002 的 `insert_messages()` 只补 `persons` 行，会话主行由这里补；T-007 的按会话删除依赖它。
+    """
+    cursor = conn.execute(
+        "INSERT OR IGNORE INTO conversations (id, title, status, created_at) VALUES (?, ?, 'active', ?)",
+        (conversation_id, title, _utc_now()),
+    )
+    return max(cursor.rowcount, 0) > 0
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     init_db(_db_path())
@@ -142,6 +199,147 @@ def health() -> dict:
         "database_exists": Path(db_path).exists(),
         "tables": tables,
         "missing_tables": missing,
+    }
+
+
+@app.post("/conversations/{conversation_id}/messages:import")
+def import_messages(conversation_id: str, payload: ImportRequest | None = Body(default=None)) -> dict:
+    """导入纯文本：T-002 解析 → 写 `messages` 表（T-008 接线）。
+
+    契约（T-002 / §6 已冻结，不改动）：
+    - 解析错误行**不阻断**导入：可解析的行照常写入，错误行按「行号 + 原因」返回（**不回显原文**）；
+    - `message_id` 冲突（重复导入）→ **拒绝整批**：整批一行都不写，返回 `409 duplicate_message_id`，
+      并在 `detail.conflicts` 里列出冲突 ID 与来源行号。
+    """
+    from parser import STATUS_REJECTED_CONFLICT, import_chat
+
+    request = payload or ImportRequest()
+    conversation_id = (conversation_id or "").strip()
+    if not conversation_id:
+        raise HTTPException(
+            status_code=400,
+            detail={"kind": privacy.ERROR_INVALID_CONVERSATION_ID, "message": "conversation_id 不能为空"},
+        )
+    text = request.text or ""
+    if not text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={"kind": "empty_text", "message": "没有可导入的文本：请粘贴 `A: 正文` / `B: 正文`"},
+        )
+
+    db_path = _db_path()
+    init_db(db_path)  # 幂等：表不存在时先建
+    conn = get_connection(db_path)
+    try:
+        report = import_chat(text, conversation_id, connection=conn)
+        if report.status == STATUS_REJECTED_CONFLICT:
+            conflicts = [
+                {"message_id": conflict.message_id, "source_line": conflict.source_line}
+                for conflict in report.conflicts
+            ]
+            logger.info(
+                "import: conversation=%s rejected_conflicts=%d（整批未写入）",
+                conversation_id,
+                len(conflicts),
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "kind": "duplicate_message_id",
+                    "message": (
+                        f"重复导入被拒绝：{len(conflicts)} 个 message_id 已存在，整批未写入"
+                        "（ARCHITECTURE.md §6 方案 A：拒绝整批，不做部分导入）"
+                    ),
+                    "conflicts": conflicts,
+                },
+            )
+        created = _ensure_conversation(conn, conversation_id, request.title)
+        conn.commit()
+    finally:
+        conn.close()
+
+    parsed = list(report.messages)
+    seq_from = min((message.seq for message in parsed), default=None)
+    seq_to = max((message.seq for message in parsed), default=None)
+    errors = [{"line_number": error.line_number, "reason": error.reason} for error in report.errors]
+
+    if report.inserted_count:
+        message = f"已写入 {report.inserted_count} 条消息（seq {seq_from}–{seq_to}）"
+        if errors:
+            message += f"；错误行 {len(errors)} 行未阻断导入"
+    else:
+        message = "没有可写入的消息：请检查格式是否为 `A: 正文` / `B: 正文`"
+
+    logger.info(
+        "import: conversation=%s inserted=%d errors=%d blank_skipped=%d",
+        conversation_id,
+        report.inserted_count,
+        len(errors),
+        report.blank_lines_skipped,
+    )
+    return {
+        "conversation_id": conversation_id,
+        "status": report.status,
+        "conversation_created": created,
+        "inserted_count": report.inserted_count,
+        "parsed_count": len(parsed),
+        "blank_lines_skipped": report.blank_lines_skipped,
+        "seq_from": seq_from,
+        "seq_to": seq_to,
+        "message_ids": [message.message_id for message in parsed],
+        "errors": errors,
+        "conflicts": [],
+        "message": message,
+    }
+
+
+@app.get("/conversations/{conversation_id}/profile")
+def get_profile(conversation_id: str, version: int | None = None) -> dict:
+    """读该会话的画像快照（T-005 产物）：默认最新版，`?version=N` 读历史版本。
+
+    `ARCHITECTURE.md` §4.6 规定 `profile_versions` 只追加、旧行不改写，所以这里**只读**。
+    没有画像时返回 `404 no_profile`——前端据此回退到离线 fixture 演示（T-006 的离线路径）。
+    """
+    from pipeline import load_latest_profile, load_profile_versions
+
+    conversation_id = (conversation_id or "").strip()
+    if not conversation_id:
+        raise HTTPException(
+            status_code=400,
+            detail={"kind": privacy.ERROR_INVALID_CONVERSATION_ID, "message": "conversation_id 不能为空"},
+        )
+
+    db_path = _db_path()
+    init_db(db_path)
+    if version is None:
+        record = load_latest_profile(conversation_id, db_path=db_path)
+    else:
+        record = next(
+            (item for item in load_profile_versions(conversation_id, db_path=db_path) if item.version == version),
+            None,
+        )
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "kind": "no_profile",
+                "message": (
+                    f"会话 {conversation_id} 还没有画像版本（先导入消息 → 同意 → 分析）"
+                    if version is None
+                    else f"会话 {conversation_id} 不存在 v{version} 画像版本"
+                ),
+            },
+        )
+
+    logger.info("profile: conversation=%s version=%d", conversation_id, record.version)
+    return {
+        "conversation_id": conversation_id,
+        "version": record.version,
+        "profile_id": record.id,
+        "created_at": record.created_at,
+        "message_count": record.message_count,
+        "snapshot": dict(record.snapshot or {}),
+        "changelog": dict(record.changelog or {}),
     }
 
 
