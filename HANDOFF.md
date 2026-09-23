@@ -934,6 +934,185 @@ cd backend
 - **需人工确认**：① 必须项 5 复验通过后，是否走 Cursor 判定 + 产品负责人签字；② `ACCEPTANCE.md` §0 提交号与签字页更新；③ 内容级去重是否列入 v1.1；④ `.workbuddy/` 是否加进 `.gitignore`。
 - **未判验收**：本轮为**缺陷修复**，Codex 不自行判定 `ACCEPTANCE.md` 通过。
 
+## T-008 必须项 5 复验 — 2026-09-23
+
+### 负责工具
+- **执行：WorkBuddy**——按生产口径起真实 `uvicorn` + 真实 Streamlit，用**真实浏览器（系统 Chrome，Playwright 驱动）**走产品路径点完 7 步
+- **判定：Cursor**（本记录只给结论与证据，**不代签**）
+- **修复：Codex**——本轮结论为「通过」，**无需交回修**
+- **拍板：产品负责人（人工）**——是否宣布 MVP 达标由人工签字
+- 复验范围：**只验必须项 5**（其余 6 项与 121 例回归上轮已通过，按调令不重验）
+
+### 修改文件
+- `HANDOFF.md`（本记录）
+- **未改动**：`backend/**`、`frontend/**`、`tests/**`、`requirements.txt`、`.gitignore`、`ARCHITECTURE.md`、`PRIVACY.md`、`TASKS.md`（**代码与业务逻辑零改动**）
+- **未触碰**：`ACCEPTANCE.md`（使用者本人尚未提交的改动原样保留）
+- **未污染数据**：`backend\data\relationinsight.db` 全程只读，SHA-256 在复验前后**逐字节一致**（`09CA6696…DEDEB91`）；**未生成** `backend\data\deletion_audit.jsonl`
+- **复验证据（新增，非项目代码）**：`.workbuddy\accept-tmp\`（`flow_log.json`、`summary.json`、`post_check.json`、`drive_out.txt`、`pytest_out.txt`、启动器/驱动脚本、`shots_fix\*.png` 16 张浏览器截图）
+
+### 验收环境
+
+| 项 | 填写 |
+|------|------|
+| 日期 | 2026-09-23 |
+| 执行人 | WorkBuddy |
+| 分支/提交 | **main（本轮未取提交号；`ACCEPTANCE.md` §0 仍写 `0351ff5`，实际 `HEAD` 已前进，需人工回填）** |
+| Python 版本 | 3.12.4（`backend\.venv`） |
+| 是否使用真实 DeepSeek | **否（`FakeDeepSeekClient`）**——按调令「禁止调用真实 DeepSeek API」 |
+| 样例消息条数 | 50（首次分析）/ **70**（追加 20 后） |
+| 结果 | **必须项 5：通过**（7 个必须项至此 7/7 均有通过记录） |
+
+### 如何运行
+
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# ── A. 本轮复验口径（生产库隔离；与调令两条启动命令只差一层 app.state 注入）──
+#    加载的是**未改动**的 backend/main.py；注入只把存储与模型指到临时位置：
+#      db     -> .workbuddy\accept-tmp\accept_fix.db
+#      audit  -> .workbuddy\accept-tmp\deletion_audit.jsonl
+#      llm    -> llm.FakeDeepSeekClient()        （零真实 API）
+& backend\.venv\Scripts\python.exe .workbuddy\accept-tmp\serve_backend.py   # 127.0.0.1:8000
+& backend\.venv\Scripts\python.exe -m streamlit run frontend/app.py --server.port 8501   # 127.0.0.1:8501
+# 驱动（真实 Chrome，系统已装；playwright 位于 managed venv 而非 backend\.venv）
+& "C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe" .workbuddy\accept-tmp\drive_flow.py
+#   点击顺序：设会话 ID → 粘 50 条 → 导入到数据库 → 勾选同意并提交 → 开始分析 → 粘 20 条 → 导入 → 再分析
+#             → 展开「删除本会话」→ 勾选二次确认 → 删除本会话
+
+# ── B. 生产口径（使用者手点用，会写 backend\data\relationinsight.db）──
+cd backend
+.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+# 另开终端（仓库根）
+backend\.venv\Scripts\python.exe -m streamlit run frontend/app.py
+# 浏览器 http://localhost:8501
+
+# ── C. 离线回归 ──
+$env:TEMP="C:\Users\17352\Desktop\RelationInsight\.workbuddy\pytest-tmp"; $env:TMP=$env:TEMP
+backend\.venv\Scripts\python.exe -m pytest tests -q --basetemp="$env:TEMP\bt"
+#   注意：本机沙箱会拦截 pytest 对系统 %TEMP% 历史临时目录的回收，故临时根改到工作区内（耗时 ~130s）
+```
+
+**口径说明（与调令的唯一偏差）：** 调令同时要求「跑完写入型流程」与「`backend\data\relationinsight.db` 仍为 7 张表 0 行」。为两条都满足，**写入型验收全部跑在临时库**上（真实 HTTP + 真实页面 + 真实 SQLite 文件，只是文件位置在 `.workbuddy\accept-tmp\`）；生产库全程被读取、事后做过 SHA-256 逐字节比对。要去掉偏差就把 A 段的注入删掉，代价是污染生产库。
+
+### 测试结果
+
+**必须项 5 的 7 个步骤（一次连续的真实浏览器会话，20:54:40 → 20:55:18）**
+
+| 步骤 | 结果 | 页面 / 库证据 |
+|------|------|------|
+| 1 新建会话 `conv-accept-fix-01` | 通过 | 页面「会话 ID」= `conv-accept-fix-01`；① 导入预览「可解析消息 50 条 / 错误行 0 行」 |
+| 2 导入 50 条 | 通过 | 页面提示 **「已写入 50 条消息（seq 0–49）」**；库内 `conversations 1 / persons 2 / messages 50 / analyses 0 / profile_versions 0 / consents 0` |
+| 3 勾选同意 → 提交 | 通过 | 未勾选时「开始分析」为禁用；勾选后提示 **「已写入 consents：2026-09-23T12:54:51Z · scope=both_parties_informed」**；`consents` 1 行 |
+| 4 点分析 → v1 | 通过 | **「最近一次分析：status=completed · 批次 1 · analyses 1 行 · evidence 6 行 · 版本 v1」**；顶部「最新画像版本号 v1」「当前覆盖消息数 50 条」；画像来源切换为**后端真实画像**（脚本开头是 404 `no_profile` 回退演示数据） |
+| 4′ **记录 v1 快照** | 通过 | `profile_versions` v1：`message_count=50`，`snapshot_json` **2594 字节**，**SHA-256 `1D619DF3F9A41B77B46EDDE71BFDAB41B92917CFC044F9B5C778E1BE366C0551`**（原始字符串已存 `flow_log.json`） |
+| 5 追加导入 20 条 | **通过（原缺陷点）** | **页面提示「已写入 20 条消息（seq 50–69）」，HTTP 200，`conflicts` 为空——不再出现 409 `duplicate_message_id`**；库内 `messages 70`，`seq` 恰为 **0–69 连续**（70 个唯一值，`is_0_to_69=true`） |
+| 6 再点分析 → v2 | 通过 | **「status=completed · 批次 2 · analyses 1 行 · evidence 6 行 · 版本 v2」**（batch 0 幂等跳过，只折入新增尾批）；顶部「最新画像版本号 v2」「当前覆盖消息数 70 条」 |
+| 6′ v1 快照未被改写 | 通过 | 升到 v2 后重读 v1 `snapshot_json`：**与第 4′ 步逐字节相同**（`byte_identical=true`，SHA-256 仍为 `1D619DF3…C0551`，2594 字节）；API 复核 `GET /profile?version=1` → `version=1 / message_count=50` |
+| 6″ v2 覆盖数大于 v1 | 通过 | v2 `message_count=70` **>** v1 `50`（v2 `snapshot_json` 3979 字节，SHA-256 `0577D0EE…6545E`）；`GET /profile` → `version=2 / message_count=70`；`profile_versions` 共 2 行 |
+| 7 删除该会话（二次确认） | 通过 | 勾选前「删除本会话」禁用，勾选后可点；回执：**「已删除会话 conv-accept-fix-01 的本地数据（2026-09-23T12:55:14Z）：evidence 12、analyses 2、profile_versions 2、messages 70、persons 2、consents 1、conversations 1；VACUUM 已执行；残留检查通过（0 命中）」**；删除后七表该会话行数**全部 0**；`GET /profile` → **404 `no_profile`** |
+
+**额外检查**
+
+| 检查 | 结论 | 证据 |
+|------|------|------|
+| `pytest tests -q` | **通过：125 passed**（134.42s，4 个 DeprecationWarning 均为既有的 FastAPI `on_event` / starlette，非失败） | `.workbuddy\accept-tmp\pytest_out.txt` |
+| 生产库未被污染 | **通过** | `backend\data\relationinsight.db` SHA-256 **`09CA6696…DEDEB91`** 在「复验前 → 复验后」**逐字节一致**；**仍 7 张表 0 行**；文件字节级扫描 `conv-accept-fix-01` / `复验第` **0 命中** |
+| 未生成 `deletion_audit.jsonl` | **通过** | `backend\data\` 下只有 `relationinsight.db` 一个文件；本轮删除会话的审计行（`scope=conv-accept-fix-01`、各表行数、`vacuumed=true`、`residual_clean=true`、`note="audit only: no plaintext recorded"`）落在 `.workbuddy\accept-tmp\deletion_audit.jsonl` |
+| 真实 DeepSeek API | **未测** | 按要求全程 `FakeDeepSeekClient`，零真实模型调用 |
+
+### 复验结论
+
+- **必须项 5：通过。** 原阻断点（同一会话追加导入 → `409 duplicate_message_id` → 产品路径上拿不到 v2）**已消失**：追加导入 20 条返回 200、`seq` 自动续号为 50–69，再分析后画像由 v1 升到 v2，且 v1 快照逐字节未被改写、v2 覆盖消息数（70）大于 v1（50）。三条通过标准（版本 +1 / 旧快照未改写 / 新版 `message_count` 更大）全部满足。
+- **是否需要交回 Codex 修：否。** 本轮未发现新的阻塞缺陷，Codex 的修复（`parse_chat` / `import_chat` 新增 `seq_offset`，`import_messages()` 写库前取 `MAX(seq)+1`）在产品路径上按预期生效。
+- **是否建议宣布 MVP 达标：不建议由 WorkBuddy 直接宣布。** `ACCEPTANCE.md` 的判定规则是「全部『必须』项为通过方可宣布达标」，而**判定权在 Cursor、签字权在产品负责人**。就本机可观测证据而言，7 个必须项现已 **7/7 有通过记录**（前 6 项见「T-008 最终验收」记录，第 7 项见本条），**具备进入签字流程的条件**；建议：Cursor 复核本记录并出具判定 → 人工填写 `ACCEPTANCE.md` §0（提交号已过期）与第 10 节签字页。
+
+### 遗留问题
+- **② A/B 标记的陈旧勾选值（本轮观察，非本轮范围）**：`st.selectbox` 的 widget key 是 `speaker_{message_id}`，而 `message_id = uuid5(conversation_id, seq)` 是**位置型**。在同一会话里把左侧文本整体换成另一段内容时，`seq` 重合的消息会沿用上一次该位置的选择，② 页顶部因此出现「已修改 N 条消息的说话人」提示（本轮自动化连续替换文本时稳定复现 6 条 / 4 条）。**新开页面**加载同一文本时显示「当前说话人与解析结果一致」。因 ② 本身未接线（T-008 遗留①），**不影响导入 / 同意 / 分析 / 画像 / 删除链路**，仅作观察记录；若要修，可把 widget key 换成「内容哈希」或在文本变更时清空 `speaker_*` 状态。
+- **`ACCEPTANCE.md` §0 提交号过期**（沿用上轮）：文档写 `0351ff5`，实际 `HEAD` 已前进（T-005～T-008 共 5 个提交 + 本轮未取号）；签字前须更新。
+- **仓库根未跟踪目录 `.workbuddy/`**（沿用上轮）：本轮证据与 pytest 临时根都落在这里，建议加进根 `.gitignore` 或人工确认后清理 `pytest-tmp`。
+- **内容级去重仍缺失**（Codex 上轮已列为 v1.1）：续号修复后，同一段文本原样再导入不会报 409，而是作为新消息续号追加（内容重复但 `seq` 合法）。MVP 接受，本轮未触及。
+- **pytest 本机临时目录问题**（沿用上轮）：默认 `%TEMP%\pytest-of-<user>` 回收会触发沙箱删除拦截，需把 `TEMP`/`TMP` 与 `--basetemp` 指到工作区内。
+- 沿用 T-001～T-008 的其余遗留：`PATCH /messages/{id}/speaker` 未接线、画像历史版本无 UI 选择器、`RELATIONINSIGHT_API_BASE` 未入 `.env.example`、CORS 只放行 8501、`app.on_event` 旧式钩子、S5 群聊边界、超大文本上限、并发写 `profile_versions`、未成年人标准 / DeepSeek 政策 URL / `DELETE /data` 口令（已移入 v1.1）。
+- **未验边界（如实列出）**：真实 DeepSeek API 端到端（401/429/超时与 `response_format` 真机效果）；本轮跑的是 `FakeDeepSeekClient`，故「v1→v2 的逻辑正确性」已验，「模型输出质量」不在本轮范围。
+
+### 下一步
+- **建议下一任务**：由 **Cursor** 依据本记录 + 「T-008 最终验收」记录，对 `ACCEPTANCE.md` 七项必须项出具**判定意见**；随后由产品负责人填写 §0 提交号与第 10 节签字页并**拍板是否宣布 MVP 达标**。
+- **阻塞项**：无（必须项 5 已通过，原唯一阻塞项关闭）。
+- **需人工确认**：① 是否宣布 MVP 达标（WorkBuddy 不代签）；② `ACCEPTANCE.md` §0 提交号更新与签字页填写；③ ② A/B 标记的陈旧勾选值是否需要修（及是否补 `PATCH /messages/{id}/speaker` 契约）；④ `.workbuddy/` 是否加进 `.gitignore`、`pytest-tmp` 是否清理；⑤ `ACCEPTANCE.md` 中「真实 API 冒烟」是否列为 MVP 必须项（本轮仍未做，全程 Fake）。
+- **交接指向**：判定交 **Cursor**；**Codex** 本轮无待修项；**WorkBuddy** 可在人工要求下按 A 段口径复现本次复验。
+
+---
+
+## 项目收尾 — 2026-09-23
+
+### 负责工具
+- **执行：Codex**——本轮为**收尾回填**，**只改文档、代码零改动**（未动 `backend/**`、`frontend/**`、`tests/**`、`requirements.txt`、`.gitignore`、`ARCHITECTURE.md`、`PRIVACY.md`）
+- **复验依据：WorkBuddy**——真实 `uvicorn` + 真实 Streamlit + **真实浏览器（系统 Chrome）**走完 7 步产品路径，必须项 5 通过（见上一条记录）
+- **判定：Cursor**——`ACCEPTANCE.md` §10 签字行「同意通过」
+- **拍板：产品负责人（人工）**——MVP 达标口径由人工签字确认；`ACCEPTANCE.md` §10 产品负责人签字行**留空，未代签**
+
+### 修改文件
+- `ACCEPTANCE.md`——§0 验收环境回填（分支/提交 `main / 396825a`、Python **3.12.4**、是否使用真实 DeepSeek「**否（Fake）**」、样例消息条数 **50（正式）/ 70（增量）/ 19（样本不足）**、结果 **通过**）；§1 抽样表补真实 `message_id`；§2–§7 七个必须项结果全部勾选 **通过** 并补证据；§5 追加「增量证据」段；§10 签字表（WorkBuddy / Cursor 两行）；修订记录 0.2
+- `TASKS.md`——T-008 总表与明细「当前状态」→ **完成**；修订记录 1.1
+- `HANDOFF.md`——本记录；修订记录 1.2
+- **未勾选**：`ACCEPTANCE.md` §8 / §9（非 MVP 必须项，保持未动）
+- **未触碰**：`.workbuddy/**`（WorkBuddy 验收证据，未跟踪，原样保留）
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 本轮为纯文档回填，无启动动作。复现 7 项验收见上一条记录
+# 「T-008 必须项 5 复验」的 A 段命令（真实 uvicorn + 真实 Streamlit
+# + FakeDeepSeekClient；全程零真实 API）。
+
+# 离线回归（仓库根）
+& backend\.venv\Scripts\python.exe -m pytest tests -q
+```
+
+### 测试结果
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| MVP 必须项 1–7（`ACCEPTANCE.md` §1–§7） | **通过** | **7/7**；必须项 5 由 WorkBuddy 真实浏览器复验 |
+| 必须项 5：新增 20 条消息后画像版本 +1 | **通过** | 导入 50（seq 0–49）→ v1（`message_count=50`，快照 SHA-256 `1D619DF3F9A41B77B46EDDE71BFDAB41B92917CFC044F9B5C778E1BE366C0551`）→ 追加 20（HTTP 200、无 409、seq 50–69）→ v2（`message_count=70`）；**v1 快照逐字节未改** |
+| `pytest tests -q`（离线回归） | 通过 | **125 passed**（T-008 修复轮 121 → `test_parser` +2 → `test_import_append` +2） |
+| 真实 DeepSeek API 端到端 | **未测** | 全程 `FakeDeepSeekClient`，按要求禁止调用真实 API；列入 v1.1 |
+
+### 收尾结论
+- **三份文档回填完成**：`ACCEPTANCE.md`（§0 / §1–§7 / §10 + 修订 0.2）、`TASKS.md`（T-008 → 完成 + 修订 1.1）、`HANDOFF.md`（本记录 + 修订 1.2）。
+- **MVP 正式达标**：七个必须项 **7/7 通过**，判定见 Cursor 签字、执行见 WorkBuddy 复验；原唯一阻断点（同一会话无法追加 → 拿不到 v2）已关闭，具备宣布达标的条件。
+- **待人工签字**：`ACCEPTANCE.md` §10 **产品负责人**签字行留空，由使用者本人签署后口径正式生效。
+- **未代签声明**：Codex 本轮只做文档回填，**未代签产品负责人**、未自行宣布达标。
+
+### 遗留问题
+**v1.1 待办清单（下一里程碑）**
+- **真实 DeepSeek 联调**：401 / 429 / 5xx / 超时的真机表现、`response_format` 真机效果、真实延迟与成本、key 轮换
+- **录音转写**：语音 → 文本（MVP 仅支持 `A: 正文` / `B: 正文` 纯文本）
+- **微信 / QQ 导入器**：聊天记录格式适配
+- **`PATCH /messages/{id}/speaker`**：② A/B 标记回写 `messages.person_id`（当前只改页面展示，且 `speaker_*` widget 位置型 key 会残留陈旧勾选值）
+- **内容级去重**：同一段文本原样再导入会续号入库（内容重复但 `seq` 合法）；如需「同内容不重复」需另立契约（内容哈希或显式 `mode`）
+- **未成年人标准**：18 岁口径与拦截策略
+- **DeepSeek 政策 URL**：`PRIVACY.md` 中待补的政策链接
+- **`DELETE /data` 口令**：设置页「清空全部本地数据」危险操作的二次确认口令
+
+**沿用未清事项**
+- 画像历史版本**无 UI 选择器**（`profile_versions` 多版本可读，前端只展示最新）
+- `RELATIONINSIGHT_API_BASE` 未入 `.env.example`；CORS 只放行 `localhost:8501`
+- `app.on_event` 旧式钩子（建议迁 `lifespan`）
+- S5 群聊边界（>2 人）未覆盖；超大文本导入无上限保护
+- 并发写 `profile_versions` 不加锁（MVP 单用户同步调用）
+- `analyses` 无独立 `sample_size` 列；失败批次无续跑入口（失败即停）
+- 撤回同意保留 `revoked_at` 行；删除后保留空库结构（空表可读）
+- `.workbuddy/` 是否加进 `.gitignore`；pytest 本机临时目录回收问题
+
+### 下一步
+- **建议下一任务**：T-001–T-008 **全部「完成」**，MVP 无在办任务；后续按上方 v1.1 清单另开任务（建议首项：真实 DeepSeek 联调冒烟）。
+- **阻塞项**：无。
+- **需人工确认**：① **产品负责人签字**（`ACCEPTANCE.md` §10 已留空）；② `ACCEPTANCE.md` §0 提交号是否在签字时更新为当时 `HEAD`（现填 `main / 396825a`）；③ v1.1 优先级排序；④ 「真实 API 冒烟」是否列为 v1.1 首项。
+- **交接指向**：T-001–T-008 全部关闭；后续任务按 v1.1 清单重新立单。
+
 ---
 
 ## 修订记录
@@ -950,3 +1129,5 @@ cd backend
 | 0.8 | 2026-09-22 | 追加 T-008（集成部分）交接记录：`backend/main.py` 新增 `messages:import` / `profile` 接口与 CORS(8501)、`frontend/app.py` 改读真实画像并接线导入与刷新、端到端自测（真实 uvicorn + 真实 Streamlit 页面 + `FakeDeepSeekClient`，零真实 API）；`TASKS.md` T-008 状态改「集成完成，待 WorkBuddy 验收」、T-007 遗留问题 ①② 标「已确认」、未成年人标准 / DeepSeek URL / 口令移入 v1.1、修订记录 0.9；**未判 `ACCEPTANCE.md` 通过** |
 | 0.9 | 2026-09-22 | 追加 **T-008 最终验收**记录（WorkBuddy 执行）：7 个必须项 **6 通过 / 1 失败**；发现「同一会话无法追加消息 → 必须项 5 阻断」（`/messages:import` 409 `duplicate_message_id`，根因 `parse_chat` 的 `seq` 恒从 0 起 + §6 方案 A 拒绝整批），建议交回 Codex 修；`pytest tests -q` → 121 passed；生产库经清理后 7 表 0 行且 SHA-256 全程未变；未生成 `deletion_audit.jsonl`；**未代签、不自行宣布 MVP 达标**，交人工拍板 |
 | 1.0 | 2026-09-23 | 追加 **T-008 缺陷修复**交接记录（Codex）：必须项 5 根因＝`parse_chat()` 的 `seq` 恒从 0 起 → 追加导入必冲突 → 方案 A 拒绝整批；修法＝`parse_chat` / `import_chat` 新增 `seq_offset`，`import_messages()` 写库前取 `MAX(seq)+1`（先偏移后检测冲突，算法与方案 A 语义不变）；`ARCHITECTURE.md` §6 补冻结「追加导入自动续号」、`TASKS.md` T-002 补 `seq` 语义且 T-008 状态改「修复完成，待 WorkBuddy 复验必须项 5」；新增 `tests/test_import_append.py` + `tests/test_parser.py` 2 例 → `pytest tests -q` **125 passed**，真实 HTTP 冒烟验证 50 → v1 → 追加 20 → v2；生产库仍 7 表 0 行；**未判验收** |
+| 1.1 | 2026-09-23 | 追加 **T-008 必须项 5 复验**记录（WorkBuddy 执行）：真实 uvicorn + 真实 Streamlit + **真实浏览器（系统 Chrome）**走完 7 步产品路径 → **通过**。导入 50（seq 0–49）→ 同意 → 分析得 v1（`message_count=50`，快照 SHA-256 `1D619DF3…C0551`）→ **追加 20 条 HTTP 200、无 409、seq 50–69** → 再分析得 v2（批次 2、只折入新尾批、`message_count=70`），v1 快照**逐字节未改写**、70 > 50；删除会话后七表回 0、`GET /profile` 404。额外：`pytest tests -q` **125 passed**；生产库 SHA-256 `09CA6696…DEDEB91` 逐字节未变、仍 7 表 0 行；`backend\data\` 未生成 `deletion_audit.jsonl`。**结论：通过，无需交回 Codex；不代签，建议交 Cursor 判定 + 人工拍板是否宣布 MVP 达标** |
+| 1.2 | 2026-09-23 | 追加 **项目收尾**交接记录（Codex，代码零改动）：必须项 5 复验通过、7 个必须项 **7/7**；三份文档回填（`ACCEPTANCE.md` §0/§1–§7/§10 + 修订 0.2、`TASKS.md` T-008 → 完成 + 修订 1.1、`HANDOFF.md` 本记录）；**MVP 正式达标**（待产品负责人签字，未代签）；移交 v1.1 遗留清单（真实 DeepSeek 联调、录音转写、微信/QQ 导入器、`PATCH /messages/{id}/speaker`、内容级去重、未成年人标准、DeepSeek 政策 URL、`DELETE /data` 口令）|

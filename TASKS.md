@@ -26,7 +26,7 @@
 | T-005 | 长期画像增量更新（新证据不覆盖旧结论，保留版本） | Codex · Cursor（合并规则） | 历史 `profile_versions` + 新批次分析 | 新版本画像；旧版本只读保留 | T-004 | 见下方 T-005 | 完成 |
 | T-006 | Streamlit 前端原型（模拟数据：导入、A/B 标记、画像卡片、证据列表） | Codex · Cursor（信息架构）· WorkBuddy（界面点验） | 模拟 JSON；UI 线框文字 | `app.py`（或 `frontend/`）可演示四块界面 | 无（可与后端并行） | 见下方 T-006 | 完成 |
 | T-007 | 一键删除与同意记录功能 | Codex · Cursor（隐私条款落地） | `PRIVACY.md`；会话/人物 ID | 同意写入；删除 API + UI；残留检查脚本 | T-001, T-006 | 见下方 T-007 | 完成 |
-| T-008 | 集成与验收 | Cursor（主导）· Codex（修缺陷）· WorkBuddy（按清单执行） | `ACCEPTANCE.md`；已实现 T-001–T-007 | 验收记录；已知问题列表；是否达标结论 | T-001–T-007 | 见下方 T-008 | 修复完成，待 WorkBuddy 复验必须项 5 |
+| T-008 | 集成与验收 | Cursor（主导）· Codex（修缺陷）· WorkBuddy（按清单执行） | `ACCEPTANCE.md`；已实现 T-001–T-007 | 验收记录；已知问题列表；是否达标结论 | T-001–T-007 | 见下方 T-008 | 完成 |
 
 ---
 
@@ -175,7 +175,7 @@
 | 输出 | 填写完成的验收清单；缺陷票；演示路径说明 |
 | 依赖 | T-001–T-007 |
 | 验收标准 | `ACCEPTANCE.md` 全部「必须」项通过；未通过项有明确豁免签字（**需人工确认**）才可标 MVP 完成 |
-| 当前状态 | 修复完成，待 WorkBuddy 复验必须项 5 |
+| 当前状态 | 完成 |
 
 **实现记录（2026-09-22，集成部分）：** `backend/main.py` 新增 **`POST /conversations/{id}/messages:import`**（纯文本 → T-002 `import_chat` → 写 `messages`；需要时用 `INSERT OR IGNORE` 补 `conversations` 主行；重复导入按 §6 已冻结的**方案 A 拒绝整批** → `409 duplicate_message_id` + `detail.conflicts` 列出冲突 `message_id` 与来源行号；响应体**不含原文**，解析错误只回「行号 + 原因」）与 **`GET /conversations/{id}/profile`**（读 T-005 快照：默认最新版、`?version=N` 读历史版、**只读**；无画像 → `404 no_profile`，前端据此回退离线 fixture）；`FastAPI(version="0.8.0")` 加 **CORS**，只放行本机 Streamlit 原型 `http://localhost:8501` / `http://127.0.0.1:8501`（`ARCHITECTURE.md` §8：服务仍只绑 `127.0.0.1`）。`frontend/app.py`：画像卡片由 `mock_profile.json` 改为**优先**调 `GET /conversations/{id}/profile`（离线/失败才回退 fixture 并显示失败原因），新增「导入到数据库」按钮（调 `messages:import`，展示写入条数 / seq 区间 / 错误行表 / 冲突表）与「刷新画像」按钮，并在导入 / 分析 / 删除后自动失效画像缓存；同意勾选与「删除本会话」沿用 T-007 接线（本轮确认可用）。**未改动 T-001–T-007 任何已冻结接口契约**；未新增依赖、未新增测试文件；`backend/data/relationinsight.db` 仍 7 张表 0 行。
 
@@ -218,3 +218,4 @@ WorkBuddy 在 T-001、T-006、T-007、T-008 必须参与运行验证。
 | 0.8 | 2026-09-22 | T-007 完成（总表与明细「当前状态」改「完成」并补实现记录与遗留问题）；T-007 明细「输入」「假设」中的待确认项据 2026-09-22 拍板改为「已确认」；拍板落地：删除范围以「按会话删除」为主 + 设置页「清空全部本地数据」危险操作与二次确认、同意文案严格按 `PRIVACY.md` §1.3 落地、不自行发挥（见 `ARCHITECTURE.md` §7 / §4.7） |
 | 0.9 | 2026-09-22 | T-008 **集成部分**完成（总表与明细「当前状态」改「集成完成，待 WorkBuddy 验收」并补实现记录 / 端到端自测结果 / 遗留问题）；T-007 遗留问题 ①② 标「已确认（2026-09-22）维持现状」、未成年人标准与 DeepSeek URL 与口令三项移入 v1.1 遗留；落地：`backend/main.py` 新增 `messages:import` 与 `profile` 接口 + CORS(8501)，`frontend/app.py` 改读真实画像并接线导入 / 刷新。**未判 `ACCEPTANCE.md` 通过** |
 | 1.0 | 2026-09-23 | **T-008 缺陷修复**（必须项 5「追加消息后画像版本 +1」）：`ARCHITECTURE.md` §6 补冻结「追加导入自动续号」；`parser.parse_chat()` / `import_chat()` 新增 `seq_offset`，`backend/main.py::import_messages()` 写库前取 `MAX(seq)+1` 实现续号（先偏移后检测冲突，方案 A 语义不变）；T-002 补 `seq` 语义；新增 `tests/test_import_append.py` + `tests/test_parser.py` 2 例 → `125 passed`。T-008 状态改「修复完成，待 WorkBuddy 复验必须项 5」 |
+| 1.1 | 2026-09-23 | T-008 必须项 5 复验通过（WorkBuddy 走真实浏览器 7 步产品路径）；T-008 状态改「完成」；MVP 7 个必须项 7/7 通过 |
