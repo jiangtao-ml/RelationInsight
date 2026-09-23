@@ -1115,6 +1115,173 @@ backend\.venv\Scripts\python.exe -m pytest tests -q --basetemp="$env:TEMP\bt"
 
 ---
 
+## 真实模型接入（DeepSeek 真实客户端，不再依赖 Fake）— 2026-09-23
+
+### 负责工具
+- **执行：Codex**——按调令一次做完所有代码改动（使用者无需手工改文件）
+- **复核：待人工**——填 Key 后首跑真实模型是使用者本机动作（**本轮未调真实 API**）
+- 范围：只动 6 个文件（见下）；`parser.py` / `llm/*` / `pipeline/*` / `privacy.py` / `frontend/**` / `tests/**`
+  一律**未动**，T-001–T-008 已冻结的接口契约与响应字段均未改（唯一可见变化是 `app` 版本号 `0.8.0` → `0.9.0`）
+
+### 修改文件
+| 文件 | 改动 |
+|------|------|
+| `backend/main.py` | ① 顶部 `load_dotenv(Path(__file__).resolve().parent / ".env")`（放在**任何** `os.environ` 读取之前，`override=False`）；② `_resolve_client()` 改为「注入 > `DEEPSEEK_API_KEY` 非空 → `DeepSeekClient()` > 否则 `FakeDeepSeekClient()` + warning」；③ 新增只读 `GET /client-info`；④ 启动日志新增一行「LLM 客户端模式：real/fake」；⑤ 新增 `_env_api_key()` / `_client_mode()` / `_client_info()` 三个内部工具 |
+| `requirements.txt` | 新增 `python-dotenv>=1.0.0,<2.0.0`（venv 已装 **1.2.3**） |
+| `backend/.env` | **新增**（已被 gitignore）：占位模板，`DEEPSEEK_API_KEY=`（**留空**）、`DEEPSEEK_BASE_URL=https://api.deepseek.com`、`DEEPSEEK_MODEL=deepseek-chat` |
+| `backend/.env.example` | **未改动**——已存在且已含同样三个键，按调令「已存在则保持原样」 |
+| `backend/.gitignore` / 仓库根 `.gitignore` | **未改动**——两者都已含 `.env`（`git check-ignore -v backend/.env` → `backend/.gitignore:1:.env`），无需补 |
+| `HANDOFF.md` | 本记录 + 修订记录 1.3 |
+
+- **未改**：`TASKS.md` / `ACCEPTANCE.md` / `ARCHITECTURE.md` / `PRIVACY.md`（本轮授权范围外）
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 1) 填 Key（唯一的人工步骤）：backend\.env → DEEPSEEK_API_KEY=sk-你的真实Key
+
+# 2) 起后端（`main.py` 会自动加载同目录 backend\.env）
+& backend\.venv\Scripts\python.exe -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8000
+
+# 3) 看模式：real = 已接真实模型；fake = 没读到 Key
+& curl.exe http://127.0.0.1:8000/client-info
+
+# 4) 离线回归（全程 Fake，不联网）
+& backend\.venv\Scripts\python.exe -m pytest tests -q
+```
+
+### 测试结果
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| `pytest tests -q` | **通过：125 passed** | 29.8s；4 个 Warning 都是既有的 `app.on_event` / starlette 弃用提示，与本次改动无关 |
+| 无 Key → `_resolve_client()` | 通过 | 返回 `FakeDeepSeekClient` 并打 warning「未检测到 DEEPSEEK_API_KEY，使用 Fake 客户端（仅用于离线测试）」（只提环境变量**名**，不含值） |
+| 有 Key → `_resolve_client()` | 通过 | 返回 `DeepSeekClient`；`model=deepseek-chat`、`base_url=https://api.deepseek.com`；`repr()` 不含 Key（既有实现） |
+| 注入 `app.state.llm_client` 优先级 | 通过 | 即使环境里有 Key，仍用注入的 Fake：单测 / 离线演示路径**不受影响** |
+| `GET /client-info`（无 Key） | 通过 | `{"mode":"fake","model":"fake","base_url":null}` |
+| `GET /client-info`（有 Key） | 通过 | `{"mode":"real","model":"deepseek-chat","base_url":"https://api.deepseek.com"}` |
+| `GET /client-info`（自定义 env） | 通过 | `DEEPSEEK_MODEL=deepseek-reasoner` + `DEEPSEEK_BASE_URL=.../v1/` → `{"mode":"real","model":"deepseek-reasoner","base_url":"https://api.deepseek.com/v1"}`（尾部 `/` 归一） |
+| `backend/.env` 真的被加载 | 通过 | 导入 `main` 前 `os.environ` 三个键均为 `None`；导入后 `DEEPSEEK_API_KEY=""`（来自 .env 的空值）、`DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` 由 .env 填入 |
+| 真实 `uvicorn` + 真实 HTTP | 通过 | 启动日志出现「**LLM 客户端模式：fake**」/「**real**」（有/无 Key 两种各跑一次）；`GET /client-info` 200；`GET /health` → `status=ok / python=3.12.4 / tables=7` |
+| 日志与响应无 Key 材料 | 通过 | uvicorn 输出与 `GET /client-info` 原始响应体全文扫描 `sk-dummy` / `not-a-real-key` / `key` → **0 命中**；日志只出现模式与模型名 |
+| 生产库未被本轮污染 | 通过 | `backend\data\relationinsight.db` SHA-256 `2142114A…FE3B` 在「uvicorn 起停 ×2 + 125 例回归 ×2」前后**逐字节一致**（本轮验证全部走临时库 / `app.state` 注入） |
+| 真实 DeepSeek API 端到端 | **未测** | 按调令不调真实 API；只构造了 `DeepSeekClient` 对象，**未发出任何真实模型请求** |
+
+### 遗留问题
+- **真实模型首跑未验**（本轮唯一空白）：需人工在 `backend\.env` 填 Key 后跑一次「导入 → 同意 → 分析」，确认 `deepseek-chat` 真实返回能通过 §5 schema 校验；401 / 429 / 5xx / 超时与 `response_format` 的真机表现仍是 v1.1 清单首项。
+- **`TASKS.md` 未增行**：本轮授权文件不含 `TASKS.md`，故未登记任务状态；建议人工补一条（如 `T-009 真实模型接入`）并写「完成」。
+- **前端未显示模式**：`frontend/**` 本轮禁改，UI 上仍看不出 real / fake；人工可用 `GET /client-info` 或启动日志确认（要在 UI 顶栏显示需另立任务）。
+- **生产库已含使用者本地数据**：`conversations 1 / persons 2 / messages 5 / consents 1 / analyses 0 / evidence 0 / profile_versions 0`（使用者本人手工导入，mtime `2026-09-23 21:14:46`）；本轮**未删改**该库，也**未生成** `deletion_audit.jsonl`。
+- **Key 只在环境里**：`.env` 不入 Git（已用 `git check-ignore` 确认；`backend/.env.example` 仍可提交）；换机器需重新填 Key，`DEEPSEEK_BASE_URL` 指向自建网关时走同一套 env。
+- **`--reload` 与多 worker 未测**：本轮只验证单进程 `uvicorn`；生产若用多 worker，`.env` 由每个进程各自加载，行为一致但未实测。
+
+### 下一步
+- **建议下一动作（人工 3 步）**：① 填 `backend\.env` 的 `DEEPSEEK_API_KEY`；② 重启后端；③ `curl http://127.0.0.1:8000/client-info` 见 `"mode":"real"` 后，导入 ≥ 20 条消息 → 勾选同意 → 点分析，看真实模型返回。
+- **阻塞项**：无（代码路径已通；真实效果取决于 Key 与账户额度）。
+- **需人工确认**：① 「真实模型冒烟」是否记为 v1.1 首项；② 是否在 `TASKS.md` / `ACCEPTANCE.md` 补本次接线记录；③ 是否要把当前模式显示到前端顶栏。
+- **未判验收**：本轮为功能接线（非验收轮），Codex 不自判 `ACCEPTANCE.md` 通过。
+
+## 研究模式字段贯通（analyses → merge → profile_versions → 前端）— 2026-09-23
+
+### 负责工具
+- 主责：**Codex**（改 `backend/pipeline/merge.py` + `frontend/app.py`、离线回归、真实 `uvicorn` + 真实 `frontend/app.py` 渲染自证）
+- 上游：上一轮「研究模式」（`backend/pipeline/prompt.py` + `ARCHITECTURE.md` §5.1：`RELATIONINSIGHT_RESEARCH_MODE` 开关；`tendencies[]` 新增 `type` / `quote_anchors` / `counter_evidence`）——**该轮未单独立节**，在本记录里一并交代
+- 触发问题：研究模式的新字段只写进了 `analyses.result_json`，**没进** `profile_versions.snapshot_json`，前端看不到。本轮把这条链路接通
+- **本轮为接线（非验收轮）**：Codex 不自判 `ACCEPTANCE.md` 通过
+
+### 修改文件
+- `backend/pipeline/merge.py`
+- `frontend/app.py`
+- `HANDOFF.md`（本记录）
+- **未改动**：`backend/pipeline/traits.py`（`fold_new_observations()` / `combine_observation()` 只认 6 个数值字段，故附加字段由 `merge.py` 自行折叠，未动 traits.py 的冲突策略）、`backend/pipeline/prompt.py`、`backend/pipeline/run.py`、`backend/pipeline/batch.py`、`backend/privacy.py`、`backend/llm/**`、`backend/main.py`、`tests/**`、`frontend/fixtures/mock_profile.json`、`ARCHITECTURE.md`
+- **未改语义**：`profile_versions` 仍**只追加、绝不 UPDATE/DELETE**；`traits[].evidence[].quote`（库内脱敏 quote 前缀）与 `traits[].quote_anchors`（模型给的逐字摘录）仍是**两套来源**、互不覆盖
+
+### 改动清单（行号 = 改后行号）
+
+`backend/pipeline/merge.py`
+
+| 位置 | 改动 |
+|------|------|
+| L56–L69（模块 docstring） | 新增「研究模式附加字段（§5.1）」小节：取值 / 折叠规则 + 「有值才写」的向后兼容承诺 |
+| L165 `_as_text()` | **新增**（紧跟 `_as_int()`）：非字符串或全空白 → 空串 |
+| L553 / L556 | **新增** `RESEARCH_TRAIT_FIELDS = ("type", "quote_anchors", "counter_evidence")`、`TRAIT_TYPE_LABELS = ("观察", "推断", "猜测")` |
+| L559 `_observation_research_fields()` | **新增**：从单条 `tendency` 取三字段，缺哪个不带哪个键 |
+| L574 `_fold_research_fields()` | **新增**：同一 `trait_key` 多批观测折叠 —— `type` / `counter_evidence` 后写覆盖（**最新批胜**），`quote_anchors` 用 `merge_unique_ids()` **合并去重**（旧的在先） |
+| L599 `_research_entry_fields()` | **新增**：算条目最终字段。`previous=None`（`added` / `revised`）只看本批；否则 `type` / `counter_evidence` 取最新批、本批没给则沿用旧值，`quote_anchors` 与旧锚点合并去重 |
+| L680（`_group_observations()` 里的 observation dict） | **新增** `**_observation_research_fields(tendency)`：三字段随观测进入归组结果 |
+| L759（`merge_profile()` 循环内） | **新增** `research = _fold_research_fields(grouped[trait_key])` |
+| L818（`revised` 分支） | **新增** `entry.update(_research_entry_fields(None, research))`——表述已改写，新条目只带本批锚点；旧锚点仍留在同一快照的 `superseded` 行 |
+| L846（`added` 分支） | **新增** `entry.update(_research_entry_fields(None, research))` |
+| L873（`supported` / `weakened` 分支） | **新增** `old_entry.update(_research_entry_fields(old_entry, research))` |
+
+`frontend/app.py`
+
+| 位置 | 改动 |
+|------|------|
+| L38 | **新增** `import html`（转义 `type` 标记，避免把模型输出当 HTML 注入） |
+| L366 `TRAIT_TYPE_COLORS` | **新增**：观察 `#1a7f37`（绿）/ 推断 `#bf8700`（橙）/ 猜测 `#6e7781`（灰）；未知取值回落灰色 |
+| L373 / L379 / L387 | **新增** `trait_type()` / `trait_quote_anchors()` / `trait_counter_evidence()`：三字段的宽松取用（字段缺失或类型不符 → 空值），**老数据不报错** |
+| L393 `render_research_fields()` | **新增**：`[观察]/[推断]/[猜测]` 彩色标记（`html.escape` + `unsafe_allow_html`）、`> 原文锚点` 引用块、`counter_evidence` 灰色 `st.caption` |
+| L413 `render_trait_card()` | statement 之后（L427）调用 `render_research_fields(entry)`——③ 画像卡片每张都显示；docstring 同步说明 |
+| L801（③ tab 说明） | 补一句：研究模式另显示标记 / 锚点 / 反例 |
+| L843（④ tab 说明） | 补一句：`quote_anchors` 为模型逐字摘录（≥ 2 条），紧随其下列出 |
+| L857（④ 证据列表展开区） | **新增** `anchors = trait_quote_anchors(entry)` → `**原文锚点（quote_anchors，模型逐字摘录，N 条）**` + 逐条 `> 引用块`，与下方脱敏 quote 表格并列 |
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 1) 离线回归（零网络、零真实 API）——预期 125 passed
+backend\.venv\Scripts\python.exe -m pytest tests -q
+
+# 2) 研究模式下的产品路径（要真实结论需真实 Key）
+cd backend
+$env:RELATIONINSIGHT_RESEARCH_MODE = "1"     # 缺省 / 其它值 = 保守模式；切换后必须重启
+.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+#  另一个终端：
+backend\.venv\Scripts\python.exe -m streamlit run frontend/app.py
+#  → 侧栏粘贴 ≥ 20 条「A: …」「B: …」→ 导入到数据库 → 顶部勾选同意 → 分析
+#  → ③ 画像卡片应出现彩色 [观察]/[推断]/[猜测] 标记、> 原文锚点引用块、counter_evidence 灰色小字
+#  → ④ 证据列表展开后，除脱敏 quote 表格外还多出「原文锚点（quote_anchors…）」
+
+# 3) 本轮用过的离线自证脚本（临时库 + ResearchFake + 真实 uvicorn:8137 + streamlit AppTest）
+#    %TEMP%\verify_research_ui.py       → 打印 [6]-[10] 与 RESULT: OK
+#    %TEMP%\verify_backcompat.py        → 后端不可达时回退 fixture，无标记、无异常
+#    脚本与临时库都在 %TEMP%，仓库零残留
+```
+
+### 测试结果
+
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| 回归 `pytest tests -q` | **通过：125 passed** | 20.8s；4 个 Warning 是既有的 `app.on_event` / starlette 弃用提示，与本轮无关 |
+| merge 侧：临时库 + 真实 `uvicorn` + `ResearchFake` 跑「导入 24 → 同意 → 分析（含合并）」 | 通过 | `update_profile()` 落 v1；快照 `traits[]` 两行都带 `type=推断`、`quote_anchors=['第 0 条消息内容','第 1 条消息内容']`、`counter_evidence=观察窗口很短，无法排除这是一次性情境。` |
+| 折叠规则（`supported` / `weakened` / `revised`） | 通过 | `supported`：`type` / `counter_evidence` 取最新批、`quote_anchors` 合并去重、条目仍沿用同一 `entry_key`；`revised`：新条目只带本批锚点、旧锚点留在 `superseded` 行；**旧版本快照对象未被就地改写** |
+| 保守模式 / 老快照结构 | 通过 | 无三字段时 `traits[]` **不多出任何键**，键序与改动前逐字节一致（上一轮已离线单测锁定，本轮复验） |
+| 前端真渲染（`streamlit.testing.v1.AppTest` 跑**真实** `frontend/app.py`，画像走真实 HTTP 200） | 通过 | `[推断]` 标记命中 **2** 次（A / B 两张卡片，色值 `#bf8700`）；`> 第 0 条消息内容` 引用块命中 **4** 次（③ 卡片 2 + ④ 证据列表 2）；`counter_evidence（反例 / 不确定）：…` caption 命中 **2** 次（另 1 条命中是 ③ 的说明文案本身） |
+| 向后兼容：后端不可达 → 回退离线 fixture（无三字段） | 通过 | 渲染 84 个 markdown 元素、**0** 个类型标记、**0** 个引用块、`AppTest.exception` 为空——老数据不报错，只是不显示 |
+| 生产库未被污染 | 通过 | 验证全程走 `%TEMP%` 临时库 + `app.state` 注入；`backend\data\relationinsight.db` 本轮只读、未改 |
+| 真实 DeepSeek API | **未测** | 按要求不调真实 API；前端渲染自证用 `FakeDeepSeekClient` 子类 `ResearchFake`（在 `default_profile()` 上补三字段） |
+
+### 遗留问题
+- **`ARCHITECTURE.md` §5.1「数据流现状（重要；接线留 v1.1）」这段已过时**：本轮已把三字段接进 `profile_versions` 与前端，该段仍写着「暂不进入 `snapshot_json`、前端也看不到……是 v1.1 任务」。本轮授权文件不含 `ARCHITECTURE.md`，**未改**——建议下一轮把该段改为「已接线（2026-09-23）」并删掉末尾那句。
+- **研究模式的 `prompt.py` 轮未单独立节**：`RESEARCH_MODE` 开关、解禁版提示词与 §5.1 契约目前只在 `ARCHITECTURE.md` §5.1 与本记录里可查；若坚持「每轮一节」的惯例，可补一条。
+- **前端不显示当前模式**：real / fake 仍需 `GET /client-info` 或启动日志确认；研究模式开关同理（import 时解析，切换必须重启）。
+- **`quote_anchors` 未与库内 quote 交叉校验**：前者是模型逐字摘录，后者是库内策略 α 脱敏前缀；二者理论上应一致，本轮不做校验（是否校验留人工拍板）。
+- **老快照不追溯补字段**：只有研究模式下**重新分析**产生的批次才带三字段；历史 `profile_versions` 行原样不动（符合 §4.6「不改写旧行」）。
+- **未测边界**：三种 `type` 只实测了「推断」；「观察」「猜测」共用同一渲染分支（配色表已就位），未单独造数据验证。
+- 沿用前几轮遗留：内容级去重、`PATCH /messages/{id}/speaker`、`ACCEPTANCE.md` §0 提交号、未跟踪的 `.workbuddy/`、以及 v1.1 清单（真实模型联调、录音转写、微信 / QQ 导入器、未成年人标准、DeepSeek 政策 URL、`DELETE /data` 口令）。
+
+### 下一步
+- **建议下一任务**：① 用真实 Key + `RELATIONINSIGHT_RESEARCH_MODE=1` 跑一次真实研究模式分析，确认真实模型按 §5.1 产出三字段且推测类 `confidence ≤ 0.5`；② 修 `ARCHITECTURE.md` §5.1 那句过时的「数据流现状」。
+- **阻塞项**：无（链路已通；「观察 / 猜测」两种标记未造数据实测，如需证据可下一轮补）。
+- **需人工确认**：① 前端是否要显示「当前模式（保守 / 研究）」徽标；② `quote_anchors` 是否要与库内 quote 做交叉校验；③ 研究模式结论是否允许出现在默认 UI（§5.1「产品边界」写明面向研究者本人）。
+- **未判验收**：本轮为接线，Codex 不自判 `ACCEPTANCE.md` 通过；验收结论仍由 Cursor / WorkBuddy 出具。
+
+---
+
 ## 修订记录
 
 | 版本 | 日期 | 说明 |
@@ -1131,3 +1298,5 @@ backend\.venv\Scripts\python.exe -m pytest tests -q --basetemp="$env:TEMP\bt"
 | 1.0 | 2026-09-23 | 追加 **T-008 缺陷修复**交接记录（Codex）：必须项 5 根因＝`parse_chat()` 的 `seq` 恒从 0 起 → 追加导入必冲突 → 方案 A 拒绝整批；修法＝`parse_chat` / `import_chat` 新增 `seq_offset`，`import_messages()` 写库前取 `MAX(seq)+1`（先偏移后检测冲突，算法与方案 A 语义不变）；`ARCHITECTURE.md` §6 补冻结「追加导入自动续号」、`TASKS.md` T-002 补 `seq` 语义且 T-008 状态改「修复完成，待 WorkBuddy 复验必须项 5」；新增 `tests/test_import_append.py` + `tests/test_parser.py` 2 例 → `pytest tests -q` **125 passed**，真实 HTTP 冒烟验证 50 → v1 → 追加 20 → v2；生产库仍 7 表 0 行；**未判验收** |
 | 1.1 | 2026-09-23 | 追加 **T-008 必须项 5 复验**记录（WorkBuddy 执行）：真实 uvicorn + 真实 Streamlit + **真实浏览器（系统 Chrome）**走完 7 步产品路径 → **通过**。导入 50（seq 0–49）→ 同意 → 分析得 v1（`message_count=50`，快照 SHA-256 `1D619DF3…C0551`）→ **追加 20 条 HTTP 200、无 409、seq 50–69** → 再分析得 v2（批次 2、只折入新尾批、`message_count=70`），v1 快照**逐字节未改写**、70 > 50；删除会话后七表回 0、`GET /profile` 404。额外：`pytest tests -q` **125 passed**；生产库 SHA-256 `09CA6696…DEDEB91` 逐字节未变、仍 7 表 0 行；`backend\data\` 未生成 `deletion_audit.jsonl`。**结论：通过，无需交回 Codex；不代签，建议交 Cursor 判定 + 人工拍板是否宣布 MVP 达标** |
 | 1.2 | 2026-09-23 | 追加 **项目收尾**交接记录（Codex，代码零改动）：必须项 5 复验通过、7 个必须项 **7/7**；三份文档回填（`ACCEPTANCE.md` §0/§1–§7/§10 + 修订 0.2、`TASKS.md` T-008 → 完成 + 修订 1.1、`HANDOFF.md` 本记录）；**MVP 正式达标**（待产品负责人签字，未代签）；移交 v1.1 遗留清单（真实 DeepSeek 联调、录音转写、微信/QQ 导入器、`PATCH /messages/{id}/speaker`、内容级去重、未成年人标准、DeepSeek 政策 URL、`DELETE /data` 口令）|
+| 1.3 | 2026-09-23 | 追加 **真实模型接入**交接记录（Codex）：`backend/main.py` 加载 `backend/.env` + `_resolve_client()` 改为「注入 > `DEEPSEEK_API_KEY` 非空 → 真实 `DeepSeekClient` > 否则 Fake + warning」+ 新增只读 `GET /client-info` + 启动打一行「LLM 客户端模式：real/fake」；`requirements.txt` 加 `python-dotenv`（venv 装 1.2.3）；新增 `backend/.env` 占位（Key 留空），`.env.example` / 两个 `.gitignore` 按调令未改。验证：`pytest tests -q` **125 passed**；无 Key→fake、有 Key→real、注入优先、自定义 model/base_url 透传均已验；真实 `uvicorn` + HTTP 通过且日志/响应无 Key 材料；生产库 SHA-256 `2142114A…FE3B` 逐字节未变。**未调真实 API**，真实模型首跑待人工填 Key |
+| 1.4 | 2026-09-23 | 追加 **研究模式字段贯通** 交接记录（Codex）：`backend/pipeline/merge.py` 新增 `_as_text` / `RESEARCH_TRAIT_FIELDS` / `_observation_research_fields` / `_fold_research_fields` / `_research_entry_fields`，并把 `type` / `quote_anchors` / `counter_evidence` 写进 `profile_versions.snapshot_json`（`added` / `revised` 只看本批；`supported` / `weakened` 的 `type` / `counter_evidence` 取最新批、锚点合并去重；有值才写，保守模式与老快照结构不变）；`frontend/app.py` 新增 三字段取用与渲染（`[观察]/[推断]/[猜测]` 彩色标记 + `> 原文锚点` 引用块 + `counter_evidence` 灰色小字），③ 卡片与 ④ 证据列表都可见、老 fixture 不报错；回归 125 passed；真实 uvicorn + 真实 AppTest 渲染自证通过（标记 2 / 锚点 4 / 反例 2）；遗留：`ARCHITECTURE.md` §5.1「数据流现状」段已过时（本轮授权不含该文件，未改） |

@@ -25,6 +25,18 @@ T-008 新增内容（集成接线，**不改动上面任何已冻结契约**）
 - 另加 CORS：只放行本机 Streamlit 原型（8501），不改变「默认绑定 127.0.0.1」的约定。
 - 新接口的响应体同样**不含聊天原文**：解析错误行只返回「行号 + 原因」。
 
+真实模型接入（本轮新增：让产品真正可用，不再依赖 Fake 客户端）
+-------------------------------------------------------------
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/client-info` | 只读：当前 LLM 客户端模式（`real` / `fake`）与模型名；**任何情况下都不返回 Key** |
+
+- 启动时先加载 `backend/.env`（不覆盖已存在的真实环境变量），再按以下优先级取客户端：
+  ① `app.state.llm_client` 已注入（单测 / 离线演示）→ 用它；② 环境里 `DEEPSEEK_API_KEY` 非空
+  → 真实 `DeepSeekClient`；③ 否则回退 `FakeDeepSeekClient`（仅用于离线测试）并打一条 warning。
+- 日志安全：启动只打一行「LLM 客户端模式：real/fake」；**不打 Key**（不打值、前缀、长度），
+  `GET /client-info` 同样只回模式，不回 Key。
+
 约定
 ----
 - 请求体 / 响应体**逐字不含**聊天原文（`PRIVACY.md` §4.2）；回执只含时间、范围、行数。
@@ -36,10 +48,12 @@ T-008 新增内容（集成接线，**不改动上面任何已冻结契约**）
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -47,6 +61,10 @@ from pydantic import BaseModel
 import privacy
 from db import DB_PATH, REQUIRED_TABLES, get_connection, init_db, list_user_tables
 from llm.deepseek import (
+    API_KEY_ENV,
+    BASE_URL_ENV,
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
     ERROR_AUTH,
     ERROR_BAD_RESPONSE,
     ERROR_CONFIG,
@@ -56,12 +74,24 @@ from llm.deepseek import (
     ERROR_RATE_LIMIT,
     ERROR_SERVER,
     ERROR_TIMEOUT,
+    MODEL_ENV,
+    DeepSeekClient,
     DeepSeekError,
+    FakeDeepSeekClient,
 )
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="RelationInsight", version="0.8.0")
+#: 没有宿主日志配置时给一条可见通道：保证「启动打一行模式」在 `uvicorn` 下真的能看见。
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+#: `backend/.env` 必须先加载（`override=False`：不覆盖已存在的真实环境变量），
+#: 且必须在**任何** `os.environ` 读取之前——`_resolve_client()` 与 `GET /client-info` 都依赖它。
+#: Key 只从环境读，本文件、日志、接口一律不回显 Key。
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+app = FastAPI(title="RelationInsight", version="0.9.0")
 
 #: T-008 CORS：只放行本机 Streamlit 原型（8501）。服务本身仍只绑 127.0.0.1（`ARCHITECTURE.md` §8），
 #: 因此这条中间件只是让浏览器里的 Streamlit 页面能跨端口访问同一台机器上的 API。
@@ -143,14 +173,55 @@ def _llm_failure(error: DeepSeekError) -> HTTPException:
 
 def _build_client():
     """生产路径：真实 DeepSeek 客户端（Key 只从环境变量读；缺失时抛 `DeepSeekError`）。"""
-    from llm import DeepSeekClient
-
     return DeepSeekClient()
 
 
-def _resolve_client():
+def _env_api_key() -> str:
+    """`DEEPSEEK_API_KEY` 的当前值，**只用于判断「有没有」**。
+
+    返回值只在本模块内部做真值判断：**不打日志、不进响应体**（不打印值、前缀、长度）。
+    """
+    value = os.environ.get(API_KEY_ENV, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _client_mode() -> str:
+    """当前会用哪种客户端：`"real"` / `"fake"`（只看类型与环境变量，不建连接、不发请求）。"""
     injected = getattr(app.state, "llm_client", None)
-    return injected if injected is not None else _build_client()
+    if injected is not None:
+        return "real" if isinstance(injected, DeepSeekClient) else "fake"
+    return "real" if _env_api_key() else "fake"
+
+
+def _resolve_client():
+    """按优先级决定用哪个 LLM 客户端（不再恒定返回 Fake）。
+
+    ① `app.state.llm_client` 已注入（单测 / 离线演示）→ 用它；
+    ② `DEEPSEEK_API_KEY` 非空 → 真实 `DeepSeekClient`；
+    ③ 否则回退 `FakeDeepSeekClient`（仅用于离线测试），并打一条 warning。
+    """
+    injected = getattr(app.state, "llm_client", None)
+    if injected is not None:
+        return injected
+    if _env_api_key():
+        return _build_client()
+    logger.warning("未检测到 %s，使用 Fake 客户端（仅用于离线测试）", API_KEY_ENV)
+    return FakeDeepSeekClient()
+
+
+def _client_info() -> dict:
+    """`GET /client-info` 的响应体：只报模式 / 模型名 / base_url，**永不回传 Key**。"""
+    mode = _client_mode()
+    if mode == "fake":
+        return {"mode": "fake", "model": "fake", "base_url": None}
+    injected = getattr(app.state, "llm_client", None)
+    if injected is not None:
+        model = str(getattr(injected, "model", None) or DEFAULT_MODEL)
+        base_url = str(getattr(injected, "base_url", None) or DEFAULT_BASE_URL).rstrip("/")
+    else:
+        model = os.environ.get(MODEL_ENV) or DEFAULT_MODEL
+        base_url = (os.environ.get(BASE_URL_ENV) or DEFAULT_BASE_URL).rstrip("/")
+    return {"mode": "real", "model": model, "base_url": base_url}
 
 
 def _consent_echo(record: privacy.ConsentRecord) -> dict:
@@ -184,6 +255,8 @@ def _ensure_conversation(conn, conversation_id: str, title: str | None = None) -
 @app.on_event("startup")
 def on_startup() -> None:
     init_db(_db_path())
+    # 启动只打一行模式（real / fake）；**不打 Key**（不打值、前缀、长度）。
+    logger.info("LLM 客户端模式：%s", _client_mode())
 
 
 @app.get("/health")
@@ -200,6 +273,19 @@ def health() -> dict:
         "tables": tables,
         "missing_tables": missing,
     }
+
+
+@app.get("/client-info")
+def client_info() -> dict:
+    """只读：当前 LLM 客户端模式（`real` / `fake`）与模型名。
+
+    - `real`：环境里有非空 `DEEPSEEK_API_KEY`（`backend/.env` 或系统环境变量），分析走真实模型；
+    - `fake`：没有 Key，回退 `FakeDeepSeekClient`（离线测试 / 演示用，结果是占位数据）；
+    - **安全**：任何情况下都不返回 Key（不返回值、前缀、长度），日志同样只打模式。
+    """
+    info = _client_info()
+    logger.info("client-info: mode=%s model=%s", info["mode"], info["model"])
+    return info
 
 
 @app.post("/conversations/{conversation_id}/messages:import")

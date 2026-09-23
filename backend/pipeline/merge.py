@@ -53,6 +53,20 @@
 
 `traits[].evidence.quote` 是**脱敏后**文本（策略 α，与 T-004 的 `evidence.quote` 同源）；
 UI 要展示原文请回查 `messages.body`。
+
+研究模式附加字段（`ARCHITECTURE.md` §5.1）
+------------------------------------------
+研究模式的 `tendencies[]` 比保守模式多出 `type` / `quote_anchors` / `counter_evidence`。
+本模块把它们**原样带进 `traits[]`**（`_group_observations()` 取、`_research_entry_fields()` 折）：
+
+- `type` / `counter_evidence`：取**最新一批**的值（本批没有就沿用旧值）；
+- `quote_anchors`：各批**合并去重**（旧的在先）。`revised` 是例外——表述已被改写，
+  新条目只带本批锚点，旧锚点留在同一快照里的 `superseded` 行中，两边都不丢；
+- 三个字段**有值才写**：保守模式不产出这些字段，因此老数据 / 保守数据的 `traits[]`
+  结构与加这个功能之前逐字节一致（不会多出空键）。
+
+`fold_new_observations()` / `combine_observation()` 在 `pipeline/traits.py` 里只认 6 个数值字段，
+所以附加字段由本模块自行折叠——这是「不改 traits.py」的前提下唯一干净的接法。
 """
 
 from __future__ import annotations
@@ -146,6 +160,13 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _as_text(value: Any) -> str:
+    """宽松取字符串：非字符串或全空白一律当「没有该字段」（返回空串）。"""
+    if isinstance(value, str):
+        return value.strip()
+    return ""
 
 
 @dataclass(frozen=True)
@@ -528,6 +549,73 @@ def count_covered_messages(conn: Any, conversation_id: str, analyses: Sequence[A
 
 # ---------------------------------------------------------------- 观测归组
 
+#: 研究模式（`ARCHITECTURE.md` §5.1）在 `tendencies[]` 上追加的三个字段。
+RESEARCH_TRAIT_FIELDS: tuple[str, ...] = ("type", "quote_anchors", "counter_evidence")
+
+#: `type` 的合法取值（仅用于自查；非法值原样带过，不阻断合并）。
+TRAIT_TYPE_LABELS: tuple[str, ...] = ("观察", "推断", "猜测")
+
+
+def _observation_research_fields(tendency: Mapping[str, Any]) -> dict:
+    """从单条 `tendency` 取研究模式的三个附加字段（缺哪个不写哪个）。"""
+    fields: dict[str, Any] = {}
+    label = _as_text(tendency.get("type"))
+    if label:
+        fields["type"] = label
+    anchors = merge_unique_ids(tendency.get("quote_anchors"))
+    if anchors:
+        fields["quote_anchors"] = anchors
+    counter = _as_text(tendency.get("counter_evidence"))
+    if counter:
+        fields["counter_evidence"] = counter
+    return fields
+
+
+def _fold_research_fields(observations: Sequence[Mapping[str, Any]]) -> dict:
+    """把同一 `trait_key` 的多条观测折成一份附加字段（观测按批次升序传入）。
+
+    - `type` / `counter_evidence`：**最新一批**的值（后写覆盖先写）；
+    - `quote_anchors`：各批**合并去重**，保持首次出现顺序。
+    """
+    fields: dict[str, Any] = {}
+    anchors: list[str] = []
+    for observation in observations:
+        if not isinstance(observation, Mapping):
+            continue
+        label = _as_text(observation.get("type"))
+        if label:
+            fields["type"] = label
+        counter = _as_text(observation.get("counter_evidence"))
+        if counter:
+            fields["counter_evidence"] = counter
+        for anchor in merge_unique_ids(observation.get("quote_anchors")):
+            if anchor not in anchors:
+                anchors.append(anchor)
+    if anchors:
+        fields["quote_anchors"] = anchors
+    return fields
+
+
+def _research_entry_fields(previous: Mapping[str, Any] | None, fresh: Mapping[str, Any]) -> dict:
+    """算出条目最终要写进快照的附加字段。
+
+    - `previous is None`（`added` / `revised`）：只看本批；
+    - 否则（`supported` / `weakened`，沿用同一条目）：`type` / `counter_evidence` 用最新一批，
+      本批没给就沿用旧值；`quote_anchors` 与旧锚点合并去重（旧的在先）。
+    """
+    baseline = previous if isinstance(previous, Mapping) else {}
+    fields: dict[str, Any] = {}
+    label = _as_text(fresh.get("type")) or _as_text(baseline.get("type"))
+    if label:
+        fields["type"] = label
+    anchors = merge_unique_ids(baseline.get("quote_anchors"), fresh.get("quote_anchors"))
+    if anchors:
+        fields["quote_anchors"] = anchors
+    counter = _as_text(fresh.get("counter_evidence")) or _as_text(baseline.get("counter_evidence"))
+    if counter:
+        fields["counter_evidence"] = counter
+    return fields
+
 
 def _group_observations(
     analyses: Sequence[AnalysisRecord],
@@ -588,6 +676,8 @@ def _group_observations(
                     "support_count": 1,
                     "sources": [analysis.id],
                     "revision_of": dict(explicit) if isinstance(explicit, Mapping) and explicit else None,
+                    # 研究模式附加字段（§5.1）：保守模式下这里是空字典，不产生多余键
+                    **_observation_research_fields(tendency),
                 }
             )
 
@@ -665,6 +755,8 @@ def merge_profile(
     changes: list[TraitChange] = []
     for trait_key in sorted(grouped):
         observation = fold_new_observations(grouped[trait_key])
+        # `fold_new_observations()` 只认 6 个数值字段，附加字段在这里单独折一份（§5.1）
+        research = _fold_research_fields(grouped[trait_key])
         old_entry_key = active_by_trait.get(trait_key)
         old_entry = entries.get(old_entry_key) if old_entry_key else None
         old_view = (
@@ -722,6 +814,8 @@ def merge_profile(
                 "sources": merge_unique_ids(observation.get("sources")),
                 "revision_of": revision_of,
             }
+            # 表述已改写：新条目只带本批锚点（旧锚点留在同一快照的 superseded 行里）
+            entry.update(_research_entry_fields(None, research))
             entries[new_entry_key] = entry
             order.append(new_entry_key)
             active_by_trait[trait_key] = new_entry_key
@@ -749,6 +843,7 @@ def merge_profile(
                     "sources": merge_unique_ids(observation.get("sources")),
                     "revision_of": dict(explicit) if isinstance(explicit, Mapping) and explicit else None,
                 }
+                entry.update(_research_entry_fields(None, research))
                 entries[new_entry_key] = entry
                 order.append(new_entry_key)
                 active_by_trait[trait_key] = new_entry_key
@@ -774,6 +869,8 @@ def merge_profile(
                     observation.get("evidence_meta"),
                     old_entry.get("evidence"),
                 )
+                # supported / weakened：type 与 counter_evidence 取最新一批，锚点合并去重（§5.1）
+                old_entry.update(_research_entry_fields(old_entry, research))
                 entry = old_entry
                 new_entry_key = str(old_entry_key)
 

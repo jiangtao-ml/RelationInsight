@@ -35,6 +35,7 @@ T-008 接线（不改动 T-001–T-007 已冻结的接口契约）：
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import sys
@@ -360,8 +361,61 @@ def change_label(entry: Mapping[str, Any]) -> str:
     return CHANGE_LABELS.get(kind, kind or "—")
 
 
+#: 研究模式（ARCHITECTURE.md 5.1）的结论类型标记：文案 -> 颜色。
+#: 观察 = 可直接从原文验证；推断 = 基于模式推测、可能有误；猜测 = 证据不足、仅供思考。
+TRAIT_TYPE_COLORS = {
+    "观察": "#1a7f37",
+    "推断": "#bf8700",
+    "猜测": "#6e7781",
+}
+
+
+def trait_type(entry: Mapping[str, Any]) -> str:
+    """取研究模式的结论类型标记 type；老数据 / 保守模式没有该字段时返回空串。"""
+    value = entry.get("type")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def trait_quote_anchors(entry: Mapping[str, Any]) -> list[str]:
+    """取研究模式的逐字原文锚点 quote_anchors；缺字段或类型不符时返回空列表（老数据不报错）。"""
+    value = entry.get("quote_anchors")
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def trait_counter_evidence(entry: Mapping[str, Any]) -> str:
+    """取研究模式的反例 / 不确定说明 counter_evidence；缺字段时返回空串。"""
+    value = entry.get("counter_evidence")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def render_research_fields(entry: Mapping[str, Any]) -> None:
+    """渲染研究模式附加字段：类型标记 + 原文锚点 + 反例（ARCHITECTURE.md 5.1）。
+
+    三个字段都是研究模式的可选产物：老快照 / 保守模式没有这些键，此处逐项兜底——
+    没有就不显示，绝不抛错（向后兼容 T-006 的离线 fixture）。
+    """
+    label = trait_type(entry)
+    if label:
+        color = TRAIT_TYPE_COLORS.get(label, "#6e7781")
+        st.markdown(
+            '<span style="color:%s;font-weight:600;">[%s]</span>' % (color, html.escape(label)),
+            unsafe_allow_html=True,
+        )
+    for anchor in trait_quote_anchors(entry):
+        st.markdown("> " + anchor.replace("\n", " "))
+    counter = trait_counter_evidence(entry)
+    if counter:
+        st.caption("counter_evidence（反例 / 不确定）：" + counter)
+
+
 def render_trait_card(entry: Mapping[str, Any]) -> None:
-    """一张结论卡片：statement + confidence + sample_size（验收 ③/④）。"""
+    """一张结论卡片：statement + confidence + sample_size（验收 ③/④）。
+
+    研究模式下另显示 [观察]/[推断]/[猜测] 标记、quote_anchors 原文锚点与
+    counter_evidence 反例（ARCHITECTURE.md 5.1）；老数据缺这三个字段时静默跳过。
+    """
     with st.container(border=True):
         superseded = entry.get("status") == "superseded"
         head = f"`{entry.get('trait_key')}`"
@@ -369,6 +423,8 @@ def render_trait_card(entry: Mapping[str, Any]) -> None:
             head += f" · 历史条目（已在 v{entry.get('superseded_at_version')} 被修订）"
         st.markdown(head)
         st.markdown(f"**{entry.get('statement') or '（无表述）'}**")
+        # 研究模式附加字段（5.1）：类型标记 + 原文锚点 + 反例；老数据无此键 -> 不显示
+        render_research_fields(entry)
         m1, m2, m3 = st.columns(3)
         m1.metric("confidence", f"{float(entry.get('confidence') or 0.0):.2f}")
         m2.metric("sample_size", f"{int(entry.get('sample_size') or 0)}")
@@ -741,7 +797,9 @@ with tab2:
 with tab3:
     st.caption(
         "按 `snapshot_to_sections()` 分 A / B / dyad 三栏（归属取自 `trait_key` 前缀）；"
-        "每张卡片显示 statement、confidence、sample_size。"
+        "每张卡片显示 statement、confidence、sample_size；"
+        "研究模式（5.1）另显示 [观察]/[推断]/[猜测] 标记、quote_anchors 原文锚点与 "
+        "counter_evidence 反例。"
     )
     col_a, col_b, col_c = st.columns(3)
     for column, owner, title in (
@@ -782,6 +840,7 @@ with tab4:
     st.caption(
         "每条结论可展开：`message_id` + **脱敏后** quote + speaker_role（§4.5）。"
         f"quote 为策略 α 脱敏后的前缀（最多 {QUOTE_MAX_CHARS} 字符）；要看完整原文，请用 `message_id` 回查 `messages.body`。"
+        "研究模式（5.1）的 `quote_anchors` 是模型逐字摘录的原文锚点（每条结论至少 2 条），紧随其下列出。"
     )
     if not visible_traits:
         st.info("没有可展示的结论。")
@@ -795,6 +854,11 @@ with tab4:
                 f"confidence {float(entry.get('confidence') or 0.0):.2f} · "
                 f"sample_size {int(entry.get('sample_size') or 0)}"
             )
+            anchors = trait_quote_anchors(entry)
+            if anchors:
+                st.markdown(f"**原文锚点（quote_anchors，模型逐字摘录，{len(anchors)} 条）**")
+                for anchor in anchors:
+                    st.markdown("> " + anchor.replace("\n", " "))
             evidence_rows: list[dict[str, Any]] = []
             for item in entry.get("evidence") or []:
                 if not isinstance(item, Mapping):

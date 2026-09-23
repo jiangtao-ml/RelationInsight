@@ -308,8 +308,77 @@ MVP 若裁剪，T-005 仍必须版本化；行内修正可放到 v1.1。**需人
 }
 ```
 
-系统提示必须包含：禁止诊断标签、禁止操控建议、每条 `statement` 必须带已有 `message_id`。  
-发给模型的消息正文为脱敏后文本，与 `evidence.quote` 一致（策略 α）。
+系统提示必须包含：禁止诊断标签、禁止操控建议、每条 `statement` 必须带已有 `message_id`（**保守模式**；研究模式的例外见 §5.1）。  
+发给模型的消息正文为脱敏后文本，与 `evidence.quote` 一致（策略 α）。两种模式下都成立。
+
+### 5.1 研究模式（实验开关，默认关闭，2026-09-23）
+
+**开关**：环境变量 `RELATIONINSIGHT_RESEARCH_MODE`
+
+- `1` / `true` / `yes` / `on`（不区分大小写）= 启用；**缺省或其它值 = 保守模式**。
+- 也可以写进 `backend/.env`（`pipeline/prompt.py` 与 `main.py` 都以 `override=False` 读取它）。
+- 开关在**进程 import 时**解析一次，所以切换后必须**重启** FastAPI / Streamlit。
+- 实现位置：`backend/pipeline/prompt.py`（`RESEARCH_MODE` / `RESEARCH_SYSTEM_PROMPT` / `CONSERVATIVE_SYSTEM_PROMPT`）。
+  因为 `pipeline/run.py` 直接 `from .prompt import SYSTEM_PROMPT`，所以 `SYSTEM_PROMPT` 取「当前生效的那一份」：
+  保守模式与 1.0 版**逐字相同**（单测锁定），研究模式为解禁版。
+
+**模式差异**
+
+| 项目 | 保守模式（默认） | 研究模式 |
+|------|------------------|----------|
+| 系统提示词 | `CONSERVATIVE_SYSTEM_PROMPT`（= §5 正文契约） | `RESEARCH_SYSTEM_PROMPT` |
+| `analyses.prompt_version` | `1.0` | `1.1` |
+| 推测动机 / 隐藏情绪 | 禁止 | 允许，但必须显式标为「推测」 |
+| 心理学概念（回避 / 投射 / 防御机制） | 禁止 | 允许描述倾向，**不得贴诊断标签 / 给人格定性** |
+| 尖锐评价、沟通问题、责任归属、双标、操控行为 | 禁止 | 允许（锋利指向行为与证据，不指向人的价值） |
+| 关系主动权 / 回避方 / 推进方 | 禁止 | 允许 |
+| 法律 / 精神科方向结论 | 禁止 | 允许输出**假说**，必须自带限定语 |
+| 操控 / 报复 / PUA 话术 | 禁止 | 允许，但必须作为**研究对象**分析（结构 / 效果 / 代价） |
+| `statement` 字数 | ≤ 60 字 | 不设上限 |
+| 证据与脱敏、同意闸门、删除 | 同左 | **不变，不放宽** |
+
+**保留的最小伦理底线（研究模式也不解除；违反则该条结论作废）**
+
+1. **禁止编造证据**：`evidence_message_ids` 必须取自本次输入中真实出现过的 `message_id`；
+   `quote_anchors` 必须是该 `message_id` 文本的逐字摘录，不得改写、润色、拼接或跨批次引用。
+2. **禁止还原脱敏内容**：`[手机号]` / `[邮箱]` / `[身份证号]` / `[银行卡号]` 是策略 α 的占位符，
+   不得猜测、补全或还原。
+3. **必须标强度**：每条结论带 `type` 与末尾标记 `[观察]` / `[推断]` / `[猜测]`，
+   且推测类（`推断` / `猜测`）`confidence` **≤ 0.5**。
+4. **法律 / 医疗类必须自带限定语**（「不构成法律意见」/「不构成医疗诊断」），
+   且不得给出用药、剂量或自伤、伤害他人的操作细节。
+5. **`counter_evidence` 必填**：写反例、不一致的原文，或拿不准的地方。
+
+**研究模式下 `tendencies[]` 新增字段**（原有 5 个字段的含义与必填性**不变**）
+
+```json
+{
+  "claim_key": "A.request_style",
+  "statement": "……（不限字数，末尾带标记）。[推断]",
+  "type": "观察 | 推断 | 猜测",
+  "confidence": 0.45,
+  "sample_size": 8,
+  "evidence_message_ids": ["msg_..."],
+  "quote_anchors": ["原文逐字摘录 1", "原文逐字摘录 2"],
+  "counter_evidence": "反例或不确定处"
+}
+```
+
+- `quote_anchors` **≥ 2 条**（研究模式的质量要求）；`evidence_message_ids` 仍 **≥ 1 条**（§5 契约底线）。
+- `schema_version` 仍为 `"1.0"`；来源用 `analyses.prompt_version = "1.1"` 区分（不新增 schema 版本）。
+
+**数据流现状（重要；接线留 v1.1）**
+
+`llm.deepseek.validate_profile_json()` 只校验必需字段、**不拒绝额外键**；`pipeline.run.filter_profile()`
+用 `dict(tendency)` 原样保留额外键并写进 `analyses.result_json`；但 `pipeline.merge._group_observations()`
+目前只读 6 个已知字段，因此 `type` / `quote_anchors` / `counter_evidence`
+**暂不进入 `profile_versions.snapshot_json`、前端也看不到**。把它们接进 `merge.py` 与前端是 v1.1 任务。
+
+**产品边界**
+
+研究模式的输出面向**研究者本人**，不适合直接展示给当事人；UI 若在研究模式下使用，
+必须显示当前模式与免责声明（非诊断、非法律意见）。两条路径都仍然只吃策略 α 脱敏后的文本，
+且研究模式**不**解除同意闸门与删除要求。
 
 ---
 
@@ -436,3 +505,4 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 | 0.5 | 2026-09-22 | T-006 轮拍板：余数批「原地长大」维持现状；新增 UI 约定——前端顶部常显当前覆盖消息数与最新画像版本号（§6） |
 | 0.6 | 2026-09-22 | T-007 轮拍板：① 删除以「按会话删除」为主，「清空全部本地数据」为设置页危险操作 + 二次确认（§0 / §7）；② 同意文案严格按 `PRIVACY.md` §1.3 落地、不自行发挥（§0 / §4.7）；补 T-007 实现约定（删除顺序、二次确认参数、`VACUUM`、残留检查、无原文回执、同意闸门） |
 | 0.7 | 2026-09-23 | **§6 补冻结「追加导入自动续号」**（T-008 必须项 5 缺陷修复）：`message_id` 算法与「重复导入拒绝整批」语义均不变，仅把 `seq` 语义明确为**会话内全局序号**，导入端取 `MAX(seq)+1` 作为起点、先偏移后检测冲突；同一段文本原样再导入不再报冲突（内容级去重留 v1.1） |
+| 0.8 | 2026-09-23 | 新增**研究模式**（实验开关，默认关闭）：`RELATIONINSIGHT_RESEARCH_MODE=1` 切到解禁版提示词，保守模式保持逐字不变（§5.1）；研究模式下 `tendencies[]` 新增 `type` / `quote_anchors` / `counter_evidence`，`PROMPT_VERSION` 记 `1.1`；最小伦理底线（禁止编造证据、禁止还原占位符、推测必须标强度、法律/医疗须自带限定语）不解除 |
