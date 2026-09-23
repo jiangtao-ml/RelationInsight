@@ -1282,6 +1282,100 @@ backend\.venv\Scripts\python.exe -m streamlit run frontend/app.py
 
 ---
 
+## T-002 宽容解析器升级（多格式标记 / 连续发言合并 / 未标记兜底）— 2026-09-23
+
+### 负责工具
+- 主责：**Codex**（重写 `backend/parser.py` 解析核心、扩展 `backend/main.py::import_messages()` 回执、重写 `tests/test_parser.py`、离线回归、三份文档回填）
+- 协作：**Cursor** 定格式规格（三项决策已拍板，规格落进 `ARCHITECTURE.md` §6）；**WorkBuddy** 按惯例提醒交接
+- 触发问题（真实用户反馈两大痛点）：① **连续说话**——同一人连发多条被拆成多条消息；② **格式不对就理解不了**——只认 `A: ` / `B: `，真实聊天里的姓名 / 我你 / 方括号写法全进不来
+- **本轮为功能升级（非验收轮）**：Codex 不自判 `ACCEPTANCE.md` 通过
+
+### 修改文件
+- `backend/parser.py`（重写解析核心：宽容标记 + 连续发言合并 + 未标记通道）
+- `backend/main.py`（仅 `import_messages()`：响应新增 `unmarked_lines`、日志加 `unmarked=%d`、空批文案更新）
+- `tests/test_parser.py`（13 例 → **37 例**；26 个测试函数 + 1 组 12 例参数化）
+- `ARCHITECTURE.md`（§0 放宽冻结表、§6 解析规则 / 连续发言合并 / 未标记行 + 两条策略表、§9 修订 0.9）
+- `TASKS.md`（顶部规格、T-002 验收口径与「放宽冻结」+ 实现记录、修订 1.2）
+- `HANDOFF.md`（本记录 + 修订 1.5）
+- **未改动**：`backend/db.py`、`backend/schema.sql`、`backend/pipeline/**`、`backend/llm/**`、`backend/privacy.py`、`frontend/**`、`tests/` 其它文件、`ACCEPTANCE.md`
+- **未改语义**：`message_id = uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")` 与「重复导入拒绝整批」（`409 duplicate_message_id`）**逐字不变**；`messages` 表结构未变（`source_lines` **不落库**）
+
+### 改动前后对比（用户点名的 7 个场景）
+
+| 场景 | 改动前 | 改动后 |
+|------|--------|--------|
+| `A: 正文` | ✅ 识别 | ✅ 识别（另：大小写不敏感，`a:` 也可） |
+| `张三: 正文` | ❌ 报错 | ✅ 识别（角色 A / B 按标记**首次出现顺序**分配） |
+| `张三：正文`（全角冒号） | ❌ 报错 | ✅ 识别（中英文冒号都接受） |
+| `我: 正文` | ❌ 报错 | ✅ 识别（`我` 恒为角色 A，`你` 恒为角色 B） |
+| `[张三] 正文` | ❌ 报错 | ✅ 识别（`【张三】正文` 同样支持） |
+| `张三连续 3 条` | 3 条独立消息 | **合并成 1 条**（`seq` 只 +1、`body` 空格连接、`source_lines=[1,2,3]`） |
+| `无法识别的行` | 报错 | 归入 `unmarked`（行号 + 原因；**不报错、不阻断导入**） |
+| `A:正文`（补充：冒号后 0 空格） | ❌ 报错 | ✅ 识别（冒号后 0~N 个空格都接受） |
+| `A: `（补充：正文为空） | 报错 | **仍报错**（`REASON_EMPTY_BODY`；不产出消息，且不打断连续段） |
+| `10:30 出发`（补充：纯数字前缀） | ❌ 报错 | 归入 `unmarked`（不误当人名） |
+
+### 契约变化（`ARCHITECTURE.md` §6「放宽冻结」）
+- `parse_chat(text, conversation_id, *, seq_offset=0, merge_consecutive=True)`：新增 `merge_consecutive` 形参；`seq_offset` 续号语义不变。
+- `MessageDTO` 新增 `source_lines: list[int]`（合并前的原始行号；`source_line` 仍写**首行号**）。
+- 新增 `UnmarkedLine(line_number, raw_text, reason)` 与 `ParseResult.unmarked`；`ParseResult.ok` 只看 `errors`（未标记**不算失败**）。
+- 解析错误只剩一种：**有标记但正文为空**（`REASON_EMPTY_BODY`）。
+- `import_chat()` 签名不变；未标记行天然不产出消息，故自动跳过。
+- `POST /conversations/{id}/messages:import` 响应新增 `unmarked_lines`（每项 `line_number` + `preview` = 该行前 **50** 字符，常量 `UNMARKED_PREVIEW_CHARS`）；**日志仍只记条数**。
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 1) 离线回归（零网络、零真实 API）
+& backend\.venv\Scripts\python.exe -m pytest tests -q        # 预期 149 passed
+
+# 2) 只看解析器行为（不起服务、不写库）
+& backend\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, r'backend'); from parser import parse_chat; r = parse_chat('A: hi\nA: again\nplain line without marker', 'conv-demo'); print([(m.seq, m.body, m.source_lines) for m in r.messages]); print([(u.line_number, u.reason) for u in r.unmarked])"
+# 期望：[(0, 'hi again', [1, 2])]  +  未标记 [(3, ...)]
+
+# 3) 产品路径（可选；会写 backend\data\relationinsight.db）
+#    工作目录 = backend
+cd backend
+.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+#    POST http://127.0.0.1:8000/conversations/{id}/messages:import
+#      → 响应新增 unmarked_lines；409 duplicate_message_id 语义不变
+```
+
+### 测试结果
+
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| 回归 `pytest tests -q`（仓库根） | **通过：149 passed** | 22.98s；口径：上轮基线 125 − `tests/test_parser.py` 旧 13 例 + 新 37 例 = **149**；`test_pipeline` / `test_merge` / `test_privacy` / `test_deepseek` / `test_import_append` 全部继续通过，**零回归** |
+| 参数化 12 例：标记写法全覆盖 | 通过 | 集合：`A:` / `a:` / `A：` / `A:你好`（0 空格）/ `A:     你好`（多空格）/ `张三:` / `张三：` / `张三2:`（含数字）/ `li_si:`（下划线）/ `我:` + `你:` / `我：` + `你：` / `[张三] 你好` / `【张三】你好`；每例都断言归到 A / B 两人 |
+| 连续发言合并（3 条张三 + 1 条李四） | 通过 | 产出 2 条；`seq=[0,1]`；`body` 空格连接；`source_lines=[[1,2,3],[4]]`、`source_line` 为首行号 |
+| `merge_consecutive=False` | 通过 | 逐行一条，`seq` 连续递增 |
+| 未标记行夹在中间 | 通过 | 前后 A/B 行照常产出、**不被阻断**；行号与 `reason` 正确 |
+| 第三位说话人不猜 | 通过 | 归「未标记」（双人硬边界），并**打断**连续段 |
+| 中英文冒号混用 / 同人换写法 | 通过 | `张三: …` + `张三：…` 仍属同一连续段 → 合并；`A:` 与 `我:` 视为同一人 |
+| 纯数字前缀 `10:30 出发` | 通过 | 不误当人名 → 未标记 |
+| `seq_offset` 续号 / 追加导入 | 通过 | 本轮 2 例 + `tests/test_import_append.py` 端到端（50 → 70、画像 v1 → v2）仍绿 |
+| 导入接口 `unmarked_lines` | 通过 | 行号 + 前 50 字符预览；未标记行不阻断导入；无可写消息仍 `nothing_to_import` |
+| 真实 DeepSeek API | **未测** | 本轮不涉及模型链路，未调真实 API |
+
+### 遗留问题
+- **前端未接（授权名单外，本轮未改）**：`frontend/app.py` ① tab 的 caption 仍写「`seq` 只对**可解析成功**的行从 0 递增」与「格式：`A: 正文` / `B: 正文`」——**口径已过时**（现为「合并后的序号 + 多格式标记」）；`unmarked_lines` 也还没展示（前端只读 `result.messages` / `result.errors`），未标记行目前在 UI 上「看不见」。
+- 合并的 `body` 用**一个空格**连接：原文的换行 / 空行信息丢失；`source_lines` 只在内存与响应里，**不落库**，重启后无法回看「这条合并消息原本是哪几行」。
+- 姓名规格 1–20 字符（中文 / 英文 / 数字 / 下划线）是**规格假设**：含空格 / 标点的姓名（如 `张三 李四:`）会判为未标记，尚未与真实用户样本对过。
+- **单字中文 + 冒号会误判**（决策 1 规格的副作用）：`注: 请尽快回复` 这类「不是说话人的单字提示」会被当成说话人（名字允许 1–20 字符），并占用 A / B 中空闲的那一个角色——实测 `注: …` + `A: …` → **2 条消息**（`注` 拿了角色 B），而不是「1 条消息 + 1 条未标记」。若要收紧，可要求中文姓名 ≥ 2 字，或加保留字黑名单（`注` / `提示` / `系统` 等）——属规格变更，需人工拍板。
+- 「不合并」开关当前只有后端形参（`merge_consecutive`），前端开关按决策 2 留到下一轮。
+- 未标记行**不占 `seq`**：若用户之后手动标注这些行，需要走 `PATCH /messages/{id}/speaker`（未实现）或重新导入，序号会与前端预期不同（需下轮一并处理）。
+- 沿用前几轮遗留：内容级去重、`PATCH /messages/{id}/speaker`、`quote_anchors` 与库内 quote 交叉校验、`ARCHITECTURE.md` §5.1 过时段、`.workbuddy/` 未跟踪、v1.1 清单（真实模型联调、录音转写、微信 / QQ 导入器、未成年人标准、DeepSeek 政策 URL、`DELETE /data` 口令）。
+
+### 下一步
+- **建议下一任务**：前端接线（需把 `frontend/app.py` 纳入授权名单）——① tab 展示 `unmarked_lines` 并更新 caption 口径；② 加「不合并」开关（调 `merge_consecutive=False`）；③ 未标记行手动标注（依赖 `PATCH /messages/{id}/speaker`）。
+- **阻塞项**：无（解析器与导入链路已通）。
+- **需人工确认**：① 合并 `body` 是否保留换行符而非空格；② 姓名标记字符集是否放宽到空格 / 标点；③ 是否需要「未标记行一键批量标注」；④ `source_lines` 是否要落库（属表结构变更）。
+- **未判验收**：本轮为功能升级，Codex 不自判 `ACCEPTANCE.md` 通过；是否纳入验收由 Cursor / WorkBuddy 决定。
+
+---
+
 ## 修订记录
 
 | 版本 | 日期 | 说明 |
@@ -1300,3 +1394,4 @@ backend\.venv\Scripts\python.exe -m streamlit run frontend/app.py
 | 1.2 | 2026-09-23 | 追加 **项目收尾**交接记录（Codex，代码零改动）：必须项 5 复验通过、7 个必须项 **7/7**；三份文档回填（`ACCEPTANCE.md` §0/§1–§7/§10 + 修订 0.2、`TASKS.md` T-008 → 完成 + 修订 1.1、`HANDOFF.md` 本记录）；**MVP 正式达标**（待产品负责人签字，未代签）；移交 v1.1 遗留清单（真实 DeepSeek 联调、录音转写、微信/QQ 导入器、`PATCH /messages/{id}/speaker`、内容级去重、未成年人标准、DeepSeek 政策 URL、`DELETE /data` 口令）|
 | 1.3 | 2026-09-23 | 追加 **真实模型接入**交接记录（Codex）：`backend/main.py` 加载 `backend/.env` + `_resolve_client()` 改为「注入 > `DEEPSEEK_API_KEY` 非空 → 真实 `DeepSeekClient` > 否则 Fake + warning」+ 新增只读 `GET /client-info` + 启动打一行「LLM 客户端模式：real/fake」；`requirements.txt` 加 `python-dotenv`（venv 装 1.2.3）；新增 `backend/.env` 占位（Key 留空），`.env.example` / 两个 `.gitignore` 按调令未改。验证：`pytest tests -q` **125 passed**；无 Key→fake、有 Key→real、注入优先、自定义 model/base_url 透传均已验；真实 `uvicorn` + HTTP 通过且日志/响应无 Key 材料；生产库 SHA-256 `2142114A…FE3B` 逐字节未变。**未调真实 API**，真实模型首跑待人工填 Key |
 | 1.4 | 2026-09-23 | 追加 **研究模式字段贯通** 交接记录（Codex）：`backend/pipeline/merge.py` 新增 `_as_text` / `RESEARCH_TRAIT_FIELDS` / `_observation_research_fields` / `_fold_research_fields` / `_research_entry_fields`，并把 `type` / `quote_anchors` / `counter_evidence` 写进 `profile_versions.snapshot_json`（`added` / `revised` 只看本批；`supported` / `weakened` 的 `type` / `counter_evidence` 取最新批、锚点合并去重；有值才写，保守模式与老快照结构不变）；`frontend/app.py` 新增 三字段取用与渲染（`[观察]/[推断]/[猜测]` 彩色标记 + `> 原文锚点` 引用块 + `counter_evidence` 灰色小字），③ 卡片与 ④ 证据列表都可见、老 fixture 不报错；回归 125 passed；真实 uvicorn + 真实 AppTest 渲染自证通过（标记 2 / 锚点 4 / 反例 2）；遗留：`ARCHITECTURE.md` §5.1「数据流现状」段已过时（本轮授权不含该文件，未改） |
+| 1.5 | 2026-09-23 | 追加 **T-002 宽容解析器升级** 交接记录（Codex）：`backend/parser.py` 重写解析核心（五级标记识别 / 中英文冒号 / 冒号后 0~N 空格 / 连续发言**默认合并** + `source_lines` / `ParseResult.unmarked` 未标记兜底，解析错误只余「有标记但正文为空」），`backend/main.py::import_messages()` 响应新增 `unmarked_lines`（行号 + 前 50 字符，**不阻断导入**），`tests/test_parser.py` 13 → 37 例 → `pytest tests -q` **149 passed**；`ARCHITECTURE.md` §0/§6/§9（修订 0.9）、`TASKS.md` 顶部规格 + T-002 明细与修订 1.2 同步；`message_id` 算法与「重复导入拒绝整批」语义**逐字不变**；遗留：前端口径未同步、`source_lines` 不落库 |

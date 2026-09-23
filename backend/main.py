@@ -122,6 +122,11 @@ _LLM_STATUS: dict[str, int] = {
 }
 
 
+#: T-002（2026-09-23 宽容解析器 / 决策 3）：未标记行回执里 `preview` 的最大长度。
+#: 只用于**响应体**（行号 + 前 50 字符）；日志仍只记条数，不记原文。
+UNMARKED_PREVIEW_CHARS = 50
+
+
 class ConsentRequest(BaseModel):
     """`POST /conversations/{id}/consent` 的请求体。"""
 
@@ -293,7 +298,11 @@ def import_messages(conversation_id: str, payload: ImportRequest | None = Body(d
     """导入纯文本：T-002 解析 → 写 `messages` 表（T-008 接线）。
 
     契约（T-002 / §6 已冻结，不改动）：
+    - **宽容解析**（2026-09-23 放宽冻结，§6）：支持 `A:` / `张三:` / `我:` / `[张三]` 等说话人标记、
+      中英文冒号、冒号后 0~N 个空格；同一说话人**连续发言默认合并**成一条消息（`seq` 只 +1）；
     - 解析错误行**不阻断**导入：可解析的行照常写入，错误行按「行号 + 原因」返回（**不回显原文**）；
+    - **未标记行**（2026-09-23 决策 3）走 `unmarked_lines`：行号 + 前 50 字符预览，**不阻断导入、
+      不计入错误**；预览只出现在这条响应里，日志仍然只记条数（PRIVACY.md §4.2）；
     - `message_id` 冲突（重复导入）→ **拒绝整批**：整批一行都不写，返回 `409 duplicate_message_id`，
       并在 `detail.conflicts` 里列出冲突 ID 与来源行号；
     - **追加导入自动续号**（2026-09-23 补冻结，§6）：写库前取该会话库内 `MAX(seq)+1` 作为
@@ -359,19 +368,28 @@ def import_messages(conversation_id: str, payload: ImportRequest | None = Body(d
     seq_from = min((message.seq for message in parsed), default=None)
     seq_to = max((message.seq for message in parsed), default=None)
     errors = [{"line_number": error.line_number, "reason": error.reason} for error in report.errors]
+    # 决策 3（2026-09-23）：未标记行回执 = 行号 + 前 50 字符预览；前端据此提示「可在 ② 手动标注」。
+    # 预览只出现在**响应体**里，不进日志（PRIVACY.md §4.2：日志只记会话 ID 与条数）。
+    unmarked_lines = [
+        {"line_number": line.line_number, "preview": line.raw_text.strip()[:UNMARKED_PREVIEW_CHARS]}
+        for line in report.unmarked
+    ]
 
     if report.inserted_count:
         message = f"已写入 {report.inserted_count} 条消息（seq {seq_from}–{seq_to}）"
         if errors:
             message += f"；错误行 {len(errors)} 行未阻断导入"
+        if unmarked_lines:
+            message += f"；未标记行 {len(unmarked_lines)} 行已跳过（不阻断导入，可在 ② A/B 标记里手动指定）"
     else:
-        message = "没有可写入的消息：请检查格式是否为 `A: 正文` / `B: 正文`"
+        message = "没有可写入的消息：请检查是否存在可识别的说话人标记（如 `A: 正文`）"
 
     logger.info(
-        "import: conversation=%s inserted=%d errors=%d blank_skipped=%d seq_offset=%d",
+        "import: conversation=%s inserted=%d errors=%d unmarked=%d blank_skipped=%d seq_offset=%d",
         conversation_id,
         report.inserted_count,
         len(errors),
+        len(unmarked_lines),
         report.blank_lines_skipped,
         seq_offset,
     )
@@ -386,6 +404,7 @@ def import_messages(conversation_id: str, payload: ImportRequest | None = Body(d
         "seq_to": seq_to,
         "message_ids": [message.message_id for message in parsed],
         "errors": errors,
+        "unmarked_lines": unmarked_lines,
         "conflicts": [],
         "message": message,
     }

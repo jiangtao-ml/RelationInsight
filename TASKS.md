@@ -5,7 +5,7 @@
 **看板规则：** 同一时刻优先推进无阻塞的就绪任务；状态仅使用：`未开始` / `进行中` / `阻塞` / `完成` / `取消`。  
 **状态更新：** 任务完成后在 `HANDOFF.md` 追加一条记录，并将本表「当前状态」改为 `完成`。
 
-**v0.1 已确认：** Python 3.12.4；同步 FastAPI + sqlite3；文本仅 `A: 正文` / `B: 正文`；模型 `deepseek-chat`（OpenAI 兼容）；脱敏策略 α；同意为 UI 勾选写入 `consents`。
+**v0.1 已确认：** Python 3.12.4；同步 FastAPI + sqlite3；文本格式 `A: 正文` / `B: 正文`（**2026-09-23 放宽**：T-002 升级为宽容解析器——多格式标记 + 连续发言合并 + 未标记兜底，见 T-002 与 `ARCHITECTURE.md` §6）；模型 `deepseek-chat`（OpenAI 兼容）；脱敏策略 α；同意为 UI 勾选写入 `consents`。
 
 **负责工具约定：**
 
@@ -53,14 +53,18 @@
 | 输入 | 纯文本；格式规格（v0.1 已冻结） |
 | 输出 | `parse_chat(text) -> list[MessageDTO]`；无法解析行的列表；将结果写入 `messages` 的服务函数 |
 | 依赖 | T-001 |
-| 验收标准 | ① 每条成功消息有全局唯一 `message_id`，用已冻结算法 `uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`（`seq` 为**会话内全局序号**：首段从 0 起，追加导入按 `seq_offset` 续号，见 §6）；② 说话人仅为 `A` 或 `B`（或绑定 `person_id`）；③ `body` 为原文完整保留；④ 空行可跳过并计数；非 `A:`/`B:` 行记入错误列表；⑤ 至少 2 个夹具样例测试通过 |
+| 验收标准 | ① 每条成功消息有全局唯一 `message_id`，用已冻结算法 `uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`（`seq` 为**会话内全局序号**：首段从 0 起，追加导入按 `seq_offset` 续号，见 §6）；② 说话人仅为 `A` 或 `B`（或绑定 `person_id`）；③ `body` 为原文完整保留；④ 空行可跳过并计数；解析错误行记入错误列表（**2026-09-23 放宽**：识别不出说话人的行进「未标记」，不报错、不阻断；仅「有标记但正文为空」算解析错误）；⑤ 至少 2 个夹具样例测试通过 |
 | 当前状态 | 完成 |
 
 **已确认（v0.1）：** 第一版**只**支持行格式 `A: 正文` 与 `B: 正文`。不支持时间前缀、微信/QQ 导出。A/B 大小写 **假设** 仅接受大写 A/B（实现时写进测试）。
 
+**放宽冻结（2026-09-23）：** 上述两条**作废**——① 不再只认 `A: 正文` / `B: 正文`，支持单字母（大小写不敏感）、真实姓名、`我` / `你`、`[姓名]` / `【姓名】`，且中英文冒号均可、冒号后 0~N 个空格；② 说话人名字 1–20 字符（中文 / 英文 / 数字 / 下划线）。完整规则见 `ARCHITECTURE.md` §6。
+
 **已确认（2026-09-22 冻结）`message_id` 算法：** `message_id = uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`，`seq` 从 **0** 开始、按导入顺序递增；同一 `(conversation_id, seq)` 必得同一 ID。**重复导入策略：拒绝整批**——写库前先做全批存在性检查，只要有一个 `message_id` 已存在，整批不写入，并在错误报告中列出冲突 ID 与来源行号（不做部分导入、不静默跳过）。完整约定见 `ARCHITECTURE.md` §6。
 
 **已确认（2026-09-23 补冻结，T-008 必须项 5 缺陷修复）`seq` 语义：** `seq` 是**会话内的全局序号**（不是「本段文本内的序号」）——`parse_chat(text, conversation_id, *, seq_offset=0)` 与 `import_chat(text, conversation_id, *, seq_offset=0, ...)` 接受 `seq_offset` 作为起点；导入端写库前取该会话 `SELECT COALESCE(MAX(seq), -1) + 1` 作为 `seq_offset`，从而实现**追加导入自动续号**。`message_id` 算法与「重复导入拒绝整批」语义**均不变**，只是把冲突检测放在**偏移之后**；同一段文本原样再导入不再报冲突（内容级去重留 v1.1）。完整约定见 `ARCHITECTURE.md` §6。
+
+**实现记录（2026-09-23）：** 升级为**宽容解析器**（多格式标记 + 连续发言合并 + 未标记兜底）。`backend/parser.py` 重写解析核心：`parse_chat(text, conversation_id, *, seq_offset=0, merge_consecutive=True)`；`MessageDTO` 新增 `source_lines: list[int]`（`source_line` 仍为首行号）；新增 `UnmarkedLine` 与 `ParseResult.unmarked`；标记识别 / 角色归并拆为 `_split_speaker()` / `_resolve_roles()` / `_role_hint()`；`import_chat()` 签名不变但**跳过未标记行**（天然不产出消息）；`message_id` 算法与「重复导入拒绝整批」语义不变。`backend/main.py::import_messages()` 响应新增 `unmarked_lines`（行号 + 前 50 字符预览，**不阻断导入**），日志只加 `unmarked=%d` 条数。`tests/test_parser.py` 由 13 例扩到 37 例（含 seq 续号 / 追加导入 50→70）。
 
 **已确认（2026-09-22 拍板）：** ① `person_id` = `uuid5(NAMESPACE_URL, f"person:{conversation_id}:{role}")`，已冻结并写入 `ARCHITECTURE.md` §4.1；② 文本中含解析错误行时，**仍导入可解析成功的行**并在报告中列出错误（含行号与原因）。该策略与「`message_id` 冲突则拒绝整批」是**两条不同规则**，见 `ARCHITECTURE.md` §6。
 
@@ -219,3 +223,4 @@ WorkBuddy 在 T-001、T-006、T-007、T-008 必须参与运行验证。
 | 0.9 | 2026-09-22 | T-008 **集成部分**完成（总表与明细「当前状态」改「集成完成，待 WorkBuddy 验收」并补实现记录 / 端到端自测结果 / 遗留问题）；T-007 遗留问题 ①② 标「已确认（2026-09-22）维持现状」、未成年人标准与 DeepSeek URL 与口令三项移入 v1.1 遗留；落地：`backend/main.py` 新增 `messages:import` 与 `profile` 接口 + CORS(8501)，`frontend/app.py` 改读真实画像并接线导入 / 刷新。**未判 `ACCEPTANCE.md` 通过** |
 | 1.0 | 2026-09-23 | **T-008 缺陷修复**（必须项 5「追加消息后画像版本 +1」）：`ARCHITECTURE.md` §6 补冻结「追加导入自动续号」；`parser.parse_chat()` / `import_chat()` 新增 `seq_offset`，`backend/main.py::import_messages()` 写库前取 `MAX(seq)+1` 实现续号（先偏移后检测冲突，方案 A 语义不变）；T-002 补 `seq` 语义；新增 `tests/test_import_append.py` + `tests/test_parser.py` 2 例 → `125 passed`。T-008 状态改「修复完成，待 WorkBuddy 复验必须项 5」 |
 | 1.1 | 2026-09-23 | T-008 必须项 5 复验通过（WorkBuddy 走真实浏览器 7 步产品路径）；T-008 状态改「完成」；MVP 7 个必须项 7/7 通过 |
+| 1.2 | 2026-09-23 | **T-002 升级为宽容解析器**（真实用户痛点：连续说话、格式不宽容）：`backend/parser.py` 重写解析核心（多格式标记 / 中英文冒号 / 冒号后 0~N 空格 / 连续发言默认合并 + `source_lines` / `ParseResult.unmarked` 兜底）、`backend/main.py::import_messages()` 响应新增 `unmarked_lines` 且未标记行不阻断导入、`tests/test_parser.py` 13 → 37 例（`pytest tests -q` → **149 passed**）；顶部规格与 T-002 验收口径据 2026-09-23 放标记为「不再只认 `A:` / `B:`」；完整约定见 `ARCHITECTURE.md` §6（修订 0.9） |
