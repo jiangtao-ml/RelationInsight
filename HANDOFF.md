@@ -710,6 +710,232 @@ backend\.venv\Scripts\python.exe -m pytest tests -q
 
 ---
 
+## T-008 最终验收 — 2026-09-22
+
+### 负责工具
+- **执行：WorkBuddy**（按 `ACCEPTANCE.md` 逐项操作：真实 HTTP + 真实 Streamlit 页面 + 真实 SQLite 文件）
+- **判定：Cursor**（本记录只给结论与证据，**不代签**）
+- **修复：Codex**（仅在收到缺陷票后修阻塞项）
+- **拍板：产品负责人（人工）**——是否宣布 MVP 达标由人工签字
+
+### 修改文件
+- `HANDOFF.md`（本记录）
+- **未改动**：`backend/**`、`frontend/**`、`tests/**`、`requirements.txt`、`.gitignore`、`ARCHITECTURE.md`、`PRIVACY.md`、`TASKS.md`（**代码与业务逻辑零改动**）
+- **未触碰**：`ACCEPTANCE.md`（保留使用者本人尚未提交的改动，原样不动）
+- **数据库**：按要求清理了 `backend/data/relationinsight.db` 中的 **1 行遗留 `consents`**（详见「前置状态修正」）；除此之外**未手工写库**，全部业务验收跑在独立临时库
+- **未生成**：`backend/data/deletion_audit.jsonl`（审计文件只出现在临时目录）
+- **验收证据（新增，非项目代码）**：`.workbuddy\accept-tmp\acceptance_report.txt`、`.workbuddy\accept-tmp\acceptance_results.json`、`.workbuddy\accept-tmp\shots\*.png`（14 张 UI 截图）
+
+### 验收环境（对应 `ACCEPTANCE.md` §0）
+
+| 项 | 填写 |
+|------|------|
+| 日期 | 2026-09-22 |
+| 执行人 | WorkBuddy |
+| 分支/提交 | **main / 0a451a7**（注意：`ACCEPTANCE.md` §0 预填的 `0351ff5` 已过期，落后 5 个提交） |
+| Python 版本 | 3.12.4（`backend\.venv`） |
+| 是否使用真实 DeepSeek | **否（`FakeDeepSeekClient`）**——按本次调令「禁止调用真实 DeepSeek API」 |
+| 样例消息条数 | 50（正式分析）/ **70**（增量后）/ 19（样本不足）/ 63（UI 走查） |
+| 结果 | **部分通过：7 个必须项中 6 通过、1 失败（必须项 5）** |
+
+### 如何运行
+
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# ── A. 本次验收口径（生产库隔离：存储与模型注入临时位置，零真实 API）──
+#    等效于验收调令里的两条启动命令，只多一层 app.state 注入；加载的是未改动的 backend/main.py
+$env:RI_ACCEPT_DIR = "C:\Users\17352\Desktop\RelationInsight\.workbuddy\accept-tmp"
+& backend\.venv\Scripts\python.exe <注入启动器>.py     # uvicorn 127.0.0.1:8000，db/audit/llm 全指向 RI_ACCEPT_DIR
+$env:RELATIONINSIGHT_API_BASE = "http://127.0.0.1:8000"
+& backend\.venv\Scripts\python.exe -m streamlit run frontend/app.py   # 127.0.0.1:8501
+
+# ── B. 生产口径（使用者手点用，会写 backend\data\relationinsight.db）──
+cd backend
+.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+# 另开终端（仓库根）
+backend\.venv\Scripts\python.exe -m streamlit run frontend/app.py
+# 浏览器 http://localhost:8501
+
+# ── C. 离线回归 ──
+backend\.venv\Scripts\python.exe -m pytest tests -q
+#   注意：本机沙箱会拦截 pytest 在系统 %TEMP% 下的历史临时目录回收；
+#   本次把临时根改到工作区内再跑，命令见「遗留问题」第 8 条。
+```
+
+**口径说明（重要，与调令的唯一偏差）：** 调令要求「禁止修改数据库」且「测试后 `backend\data\relationinsight.db` 仍为 0 行」。为同时满足这两条，所有**写入型**验收（导入 / 同意 / 分析 / 增量 / 删除）都通过**真实 HTTP + 真实页面**跑在 `.workbuddy\accept-tmp\accept.db` 上；生产库全程只被读取，事后做过 SHA-256 逐字节比对。若要「在原库上跑一遍」，把 A 段的注入去掉即可复现，但会污染生产库。
+
+### 测试结果
+
+**必须项（`ACCEPTANCE.md` §1–§7）**
+
+| 项 | 结论 | 证据要点 |
+|----|------|----------|
+| 1 结论可追溯（抽 10 条） | **通过** | 50 条正式分析 → 增量后 v2（70 条）。**2 条结论 × 6 条证据 = 12 组「结论→message_id→原文」全部核对通过（12/12 ≥ 10）**；每条 `message_id` 均能在 `messages` 打开原文；`evidence.quote` 与 `normalise_quote(mask_text(body))` 一致；quote 中 PII 零命中。抽样明细见 `acceptance_report.txt` |
+| 2 样本量与置信度 | **通过** | 2/2 条正式结论均带 `confidence`（0.5，∈[0,1]）与 `sample_size`（25 ≥ 1）；UI 画像卡片与 `GET /profile` JSON 均可读到这两个字段 |
+| 3 少于 20 条提示「样本不足」 | **通过** | 19 条 → `POST /analyze` 返回 `status=insufficient_sample`，文案逐字含「**样本不足**：当前仅有 19 条消息…」；`profile_versions` / `analyses` / `evidence` 均为 0 行（**未调用模型**）；`messages` 保留 19 条；真实页面顶部同样渲染该文案（截图 `11_sample_insufficient_top.png`） |
+| 4 一键删除后无残留 | **通过** | 删除前该会话 7 表 90 行 → `DELETE /conversations/{id}?confirm=true` → 7 表全 0；`GET /profile` → 404；`VACUUM` 已执行；**库文件（含 -wal/-shm/-journal）字节级扫描**：唯一原文片段 0 命中、手机号/邮箱/银行卡 0 命中、会话 ID 0 命中；内置残留检查 `clean=true / hits=0`；删除回执与审计均不含原文。另有独立复现实验两轮（`conv-repro-01/02`）同样 0 命中。UI 侧「删除本会话」二次确认按 `disabled=True → 勾选 → False` 实测生效（截图 `12/13/14/15_*.png`） |
+| 5 新增 20 条后画像版本 +1 | **失败（阻断）** | **产品路径不可达**：`POST /messages:import` 追加 20 条 → **HTTP 409 `duplicate_message_id`**（50 个 `message_id` 冲突，整批未写入）。根因见下节。**逻辑层已单独验证正确**：按 T-002 冻结的 `seq` 补写 50–69 后走真实 `/analyze` → `versions=[1,2]`、v1 的 `snapshot_json` **逐字节未改写**、`message_count` 50 → 70、既有批次未重算（`analyses=2`、`batches_skipped=1`） |
+| 6 同意门闩 | **通过** | 未同意时 `POST /analyze` → **403 `no_consent`**，且 `analyses` / `profile_versions` 均 0 行（**闸门先于管道，未触模型**）；UI 侧未勾选时「提交同意」「开始分析」两个按钮 `disabled=True`，勾选后 `False`；`POST /consent` 200 落库（`granted=1 AND revoked_at IS NULL`）后分析 200 并产出 v1 |
+| 7 范围与安全文案 | **通过** | UI 可见「不是心理诊断、不是人格标签、不推测对方动机/想法（不读心）、不提供操控或 PUA 建议」「不做心理诊断、不给人格标签、不推测对方想法」「只处理你主动粘贴的文本」「调用模型前对手机号/邮箱/身份证号/银行卡号做正则脱敏」「删除删不掉的部分（§2.3 三条披露）」；**不做清单**在 `PROJECT.md` §3 完整可查；`git ls-files` **无 `.env`、无 `*.db`**（根 `.gitignore` 已覆盖）；全仓正则扫 `sk-*` / `DEEPSEEK_API_KEY=<值>` **零命中**；服务实测 `127.0.0.1:8000`、`127.0.0.1:8501` LISTENING（**未绑 0.0.0.0**，该项不豁免） |
+
+**额外检查**
+
+| 检查 | 结论 | 证据 |
+|------|------|------|
+| `pytest tests -q` | **通过：121 passed**（4 个 DeprecationWarning，均为 FastAPI `on_event` / starlette testclient，非失败） | 用时 130s（临时根落在工作区磁盘，比 T-007 记录的 13.5s 慢，属环境差异） |
+| 生产库未被污染 | **通过** | `backend\data\relationinsight.db` SHA-256 在「清理后 → pytest 后 → 全部验收后」三个阶段**逐字节一致**（`09CA6696…DEDEB91`）；**仍为 7 张表 0 行** |
+| 未生成 `deletion_audit.jsonl` | **通过** | `backend\data\` 下只有 `relationinsight.db` 一个文件；审计文件仅存在于 `.workbuddy\accept-tmp\` 与 pytest 临时目录 |
+
+**功能冒烟（§8）与非功能（§9）**
+
+| ID | 结论 | 证据 |
+|----|------|------|
+| S2 50 条一批 | **通过** | `plan_batches(100)` → `[(0,49),(50,99)]` 2 个完整批；实例：63 条 → 2 批（50+13）、70 条 → 2 批（50+20） |
+| S3 前端四块 | **通过** | 四个 tab = ① 导入预览 / ② A/B 标记 / ③ 画像卡片 / ④ 证据列表（截图 `01/08_*.png`） |
+| S4 证据点击 | **通过** | ④ 展开结论可见 `message_id` / `seq` / 脱敏 `quote` / `speaker_role` 表格（截图 `06_evidence_list.png`） |
+| S5 群聊/第三人 | **部分通过（需人工确认）** | `C: …` 被记为错误行「说话人标记无效：仅支持大写 A 或 B」，但**同批的 A/B 行仍照常入库**（3 条）——即三人对话会被**部分**当成两人对话摄入，没有「群聊超出 MVP 范围」的显式拦截 |
+| S1 导入 + A/B 改标 | **未通过（已知）** | `PATCH /messages/{id}/speaker` **未接线**：② 页改标只改页面展示，不回写 `messages.person_id`（T-008 遗留①，未新增契约） |
+| S6 无 Key | **未测** | 本次全程 Fake 客户端、零真实 API；`DeepSeekError` 的 `missing_api_key` 分支由 T-003 单测覆盖，未做真机联调 |
+| §9 空文本导入 | **通过** | `text="   "` → 400 `empty_text`，文案友好 |
+| §9 超大文本 | **未测** | MVP 5000 条上限属「需人工确认」项，当前实现未见上限校验 |
+| §9 删除二次确认 | **通过** | 缺 `confirm` → 400 `confirmation_required`（会话级与 `DELETE /data` 均如此）；UI 侧按钮默认禁用 |
+
+### 失败项细节（必须项 5）
+
+**现象**
+
+```text
+POST /conversations/conv-accept-0001/messages:import
+   body: {"text": "<同一会话的完整 70 条文本>"}
+→ HTTP 409 {"kind":"duplicate_message_id",
+            "message":"重复导入被拒绝：50 个 message_id 已存在，整批未写入
+                       （ARCHITECTURE.md §6 方案 A：拒绝整批，不做部分导入）",
+            "conflicts":[{"message_id":"609966b0-…","source_line":1}, … 共 50 条]}
+```
+
+**根因（读源码得出，非猜测）**
+
+1. `backend/parser.py::parse_chat()` 的 `seq` **恒从 0 开始**、按本次输入的可解析行递增；`message_id = uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")` 因此**只由「会话 + 本条在本段文本里的序号」决定**。
+2. 于是「在同一会话追加 20 条」只有两条路，**都被堵死**：
+   - 只粘新 20 行 → `seq` 又从 0 起 → 与既有 0–19 的 `message_id` **必然冲突**；
+   - 粘完整 70 行 → 前 50 条与库里既有 `message_id` 冲突 → 触发 §6 方案 A「**拒绝整批**」→ 一行都写不进去。
+3. `backend/main.py::import_messages()` 忠实执行了 `import_chat()` 的语义，没有旁路；`frontend/app.py` 的「导入到数据库」按钮把整个文本框内容原样提交，因此**用户界面同样无法完成追加**。
+
+**影响**
+
+- `ACCEPTANCE.md` 必须项 5 的**通过标准无法通过产品路径验证**（只能像本次这样，在逻辑层补写 `seq` 后证明「合并/版本逻辑本身是对的」）。
+- 产品卖点「持续增量更新长期画像」（`PROJECT.md` §1、§4.3）在**未接线的 UI 上实际不可达**：第二次分析永远只会看到 `batches_skipped`，用户拿不到 v2。
+- 与 T-005 已记录的「余数批原地长大」叠加后更明显：即便将来能追加，尾批 `batch_index` 已存在也不会重算。
+
+**是否需要交回 Codex 修：是（阻塞项，建议必修）**。本次**未改任何代码**（调令禁止），仅留缺陷票。可选修法（供 Codex / Cursor 决策，不在本次范围）：
+- **A（推荐）**：导入端在写库前取 `MAX(seq)+1` 作为 `seq_offset`，让新批次的 `seq` 自然续号（`message_id` 随之唯一），并明确它与 §6「方案 A 拒绝整批」的边界（方案 A 退化为「同批自重复 / 与偏移后仍冲突」才拒绝）。
+- **B**：`import_chat()` 增加显式 `seq_offset` 参数，由调用方（含 UI）传入；契约需 Cursor 重新冻结。
+- **C（不推荐）**：改成「部分导入 + 跳过已存在行」——与已冻结的方案 A 直接冲突，且会静默吞数据。
+
+### 遗留问题
+- **上述必须项 5 阻断**（新增）。这是本次验收唯一的实质缺陷，也是唯一需要 Codex 动手的点。
+- **S5 范围边界偏软**（新增）：三人及以上输入只把 `C:` 行标错，A/B 行仍入库，缺少「群聊超出 MVP 范围」的显式拒绝；建议与缺陷票一并处理或明确豁免。
+- **`ACCEPTANCE.md` §0 的提交号过期**（新增）：文档写 `0351ff5`，实际 `HEAD=0a451a7`（T-005～T-008 共 5 个提交未回填）。请在签字前更新。
+- **`ACCEPTANCE.md` 自身仍有未提交改动**（`git status` → ` M ACCEPTANCE.md`）：本次未触碰，签字页与 §0/§1–§7 的勾选需人工补填，建议填完再提交。
+- **仓库根出现未跟踪目录 `.workbuddy/`**（新增）：本次验收的证据与 pytest 临时根都落在这里（`.workbuddy\accept-tmp\`、`.workbuddy\pytest-tmp\`）。这些不属于项目资产，建议加进根 `.gitignore`（本次未改），或由人工确认后删除 `pytest-tmp`。
+- **pytest 在本机的临时目录问题**（新增）：默认 `%TEMP%\pytest-of-<user>` 的历史目录回收会触发本机沙箱的删除拦截，需把 `TEMP`/`TMP` 与 `--basetemp` 都指到工作区内再跑；这会让 121 例耗时从 ~13.5s 涨到 ~130s。
+- **沿用 T-001～T-008 集成部分的全部遗留**：`PATCH /messages/{id}/speaker` 未接线、画像历史版本无 UI 选择器、`RELATIONINSIGHT_API_BASE` 未写进 `.env.example`、CORS 只放行 8501、`app.on_event` 旧式钩子（本次 pytest 仍报 DeprecationWarning）、撤回同意保留 `revoked_at` 行、删除后保留空库结构（后两条均已确认维持现状）、未成年人标准 / DeepSeek 政策 URL / `DELETE /data` 口令（已移入 v1.1）。
+- **未验边界（如实列出）**：真实 DeepSeek API 端到端（含 401/429/超时行为与 `response_format` 真机效果）、超大文本上限、文件系统快照/备份/SSD 磨损层的残留、并发写 `profile_versions`。
+
+### 前置状态修正（本次对数据库的唯一动作）
+
+验收开始前，`backend/data/relationinsight.db` **并不是** `TASKS.md`/`HANDOFF.md` 记载的「7 张表 0 行」：
+
+```text
+conversations 0 / persons 0 / messages 0 / analyses 0 / evidence 0 / profile_versions 0
+consents      1   ← conv-demo-0001, granted=1, scope=both_parties_informed, created_at 2026-09-22T09:00:13Z
+```
+
+该行时间戳（UTC 09:00:13 ≈ 本地 17:00:13）与文件 mtime 吻合，判断为**本地手工点验时在 UI 上点过「提交同意并写入 consents」**留下的（`frontend/app.py` 的默认 `conversation_id` 即 `conv-demo-0001`；对应会话主行不存在，属孤儿同意行）。按使用者明确指示用 SQL 清理：**先整库备份** → `DELETE FROM consents WHERE conversation_id = 'conv-demo-0001'`（影响 1 行）→ `VACUUM`。
+
+- 清理前备份：`%TEMP%\ri_prod_backup_before_cleanup.db`（102400 字节，可回滚）
+- 清理后：**7 张表 0 行**；库文件字节级 `conv-demo-0001` **0 命中**
+- 之后直到本记录写入，生产库 SHA-256 未再变化
+
+### 下一步
+- **建议下一任务**：把「必须项 5 追加消息不可达」作为**缺陷票**交 **Codex** 修（冻结新契约前先由 **Cursor** 定 `seq` 续号口径）；修完只需重跑必须项 5 的产品路径即可，其余 6 项与 121 例回归已通过、无需重验。
+- **是否宣布 MVP 达标**：**WorkBuddy 不建议直接宣布。** 理由：`ACCEPTANCE.md` 判定规则是「全部『必须』项为通过方可宣布达标」，当前 7 项中 **6 通过 / 1 失败**，不满足该条款；按项目宪章也不支持「先达标后补」。**建议交回人工拍板**，可选路径：
+  1. **先修后判**（推荐）：Codex 修完必须项 5，WorkBuddy 只复验该项，再由 Cursor 判定、产品负责人签字；
+  2. **豁免后判**：若人工认为「MVP 交付以单次分析可用为准、增量留到 v1.1」，则须按 `ACCEPTANCE.md` 顶部规则**书面豁免并签字（姓名/日期）**，把必须项 5 明确移入 v1.1，同时接受「长期画像增量在 UI 上不可达」这一后果。
+- **阻塞项**：必须项 5（追加消息路径缺失）。
+- **需人工确认**：① 是否走「先修后判」还是「豁免后判」；② S5 群聊边界是否豁免；③ `ACCEPTANCE.md` §0 提交号更新与签字页填写；④ `.workbuddy/` 是否加入 `.gitignore`；⑤ 是否允许在**生产库**上再跑一遍同口径验收（会写库）。
+
+## T-008 缺陷修复（必须项 5：追加导入自动续号） — 2026-09-23
+
+### 负责工具
+- 主责：**Codex**（补冻结契约口径 + 修代码 + 离线回归 + 真实 HTTP 冒烟）
+- 输入依据：**WorkBuddy** 的「T-008 最终验收」（7 个必须项 **6 通过 / 1 失败**，唯一失败项 = 必须项 5「追加消息后画像版本 +1」）；产品口径 = WorkBuddy 推荐的**方案 A：追加导入自动续号**
+- **本轮只修缺陷、不判验收**：必须项 5 需由 **WorkBuddy** 重跑产品路径复验，结论仍由 **Cursor** 出具、产品负责人签字
+
+### 修改文件
+- `ARCHITECTURE.md`（§6 补冻结「追加导入自动续号」：`seq` 语义改为**会话内全局序号**、导入端取 `MAX(seq)+1`、先偏移后检测冲突；修订记录 0.7）
+- `TASKS.md`（T-002 补 `seq` 语义与验收标准措辞；T-008 总表与明细状态改「修复完成，待 WorkBuddy 复验必须项 5」并补缺陷修复实现记录与 1 条遗留；修订记录 1.0）
+- `backend/parser.py`（`parse_chat()` / `import_chat()` 新增 `seq_offset=0`，`seq` 从 `seq_offset` 起递增；非 int / 负数早失败）
+- `backend/main.py`（`import_messages()` 写库前取 `SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE conversation_id = ?` 作为 `seq_offset`；导入日志加 `seq_offset`）
+- `tests/test_parser.py`（+2 例；并在既有参数校验用例补 `seq_offset` 断言）
+- `tests/test_import_append.py`（**新增**，2 例离线端到端：50+20 续号 → 画像 v1→v2；偏移后仍冲突仍拒绝整批）
+- `HANDOFF.md`（本记录）
+- **未改动**：`backend/db.py`、`backend/schema.sql`、`backend/llm/**`、`backend/pipeline/**`、`backend/privacy.py`、`frontend/**`、`requirements.txt`、`.gitignore`、`ACCEPTANCE.md`（保留 WorkBuddy 的验收证据与使用者本人改动，原样未动）
+- **未动语义**：`message_id` 算法本身（仍 `uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`）、§6 方案 A「拒绝整批」——只把**起点**从「恒 0」改为「`MAX(seq)+1`」，即**先偏移、后检测冲突**
+
+### 如何运行
+```text
+# 仓库根：C:\Users\17352\Desktop\RelationInsight
+# Python：backend\.venv\Scripts\python.exe（3.12.4）
+
+# 1) 离线回归（零网络、零真实 API）
+backend\.venv\Scripts\python.exe -m pytest tests -q
+#   → 125 passed（T-008 集成时的 121 + 本轮新增 4）
+
+# 2) 只跑本轮相关用例
+backend\.venv\Scripts\python.exe -m pytest tests/test_import_append.py tests/test_parser.py -q
+
+# 3) 产品口径起服务（会写 backend\data\relationinsight.db）
+cd backend
+.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+#   POST /conversations/{id}/messages:import   ← 追加导入已在后端自动续号
+#   POST /conversations/{id}/analyze            ← 取新增尾批，画像版本 +1
+
+# 4) 本轮真实 HTTP 冒烟的复现方式（临时库 + Fake 模型，零真实 API；脚本跑完已删）
+#    启动器把 app.state.db_path / audit_path / llm_client 指到 %TEMP%\ri_t008fix\，
+#    uvicorn 绑 127.0.0.1:8012；客户端用 urllib 依次调 import(50) → consent → analyze
+#    → import(20) → analyze → GET profile?version=1 → GET profile
+```
+
+### 测试结果
+
+| 用例 | 结果 | 备注 |
+|------|------|------|
+| 回归 `pytest tests -q` | 通过 | **`125 passed`**（121 + 4），零回归 |
+| `tests/test_parser.py::test_parse_chat_with_seq_offset_continues_numbering` | 通过 | `seq_offset=50` → `seq` 50–69；与 `make_message_id(conv, 0..49)` 生成的 ID **完全不重合** |
+| `tests/test_parser.py::test_appended_import_continues_seq_and_write_succeeds` | 通过 | 50 条 + `seq_offset=50` 的 20 条 → 两次都 `inserted`，库内 `messages` **70** 行、`seq` 0–69 连续、70 个唯一 ID、`persons` 仍 2 行；不带 `seq_offset` 的同类调用仍 `rejected_conflict`（证明修复点在续号而非冲突策略） |
+| `tests/test_import_append.py::test_append_import_continues_seq_then_profile_version_bumps` | 通过 | 必须项 5 的**产品路径**：导入 50 → 同意 → 分析 v1 → 追加 20（HTTP 200、seq 50–69、conflicts 0）→ 再分析 → **画像 v2**（`batch_count=2` / `analyses_written=1`），v1 快照前后完全一致、`message_count=70` |
+| `tests/test_import_append.py::test_conflict_after_offset_still_rejects_the_whole_batch` | 通过 | 显式压回 `seq_offset=0` → 仍 `409` / `rejected_conflict`，整批 0 行写入（方案 A 语义未被削弱） |
+| 真实 HTTP 冒烟（`uvicorn 127.0.0.1:8012` + 临时库 + `FakeDeepSeekClient`） | 通过 | 导入 50（seq 0–49）→ consent → analyze（v1）→ **追加 20 → HTTP 200、seq 50–69、conflicts 0**（旧实现此处 409 `duplicate_message_id`）→ analyze（v2）→ `GET profile?version=1` sha256 未变 → `GET profile` = v2 / `message_count=70`；库内 `conversations 1 / persons 2 / messages 70 / analyses 2 / evidence 12 / profile_versions 2 / consents 1`，批次 `[(0, 0, 49), (1, 50, 69)]`，版本 `[(1, 50), (2, 70)]` |
+| 生产库未被污染 | 通过 | `backend\data\relationinsight.db` 仍 **7 张表 0 行**（冒烟全程跑在 `%TEMP%` 临时库；临时脚本与临时库跑完已删） |
+| 真实 DeepSeek API | **未测** | 按要求全程 `FakeDeepSeekClient`；必须项 5 的复验由 WorkBuddy 决定是否用真实 API |
+
+### 遗留问题
+- **内容级去重缺失（新增，v1.1）**：续号修复后，把**同一段文本原样再导入**不再报 `409`，而是被当作新消息续号追加（内容重复但 `seq` 合法）。MVP 接受该行为；若需要「同内容不重复入库」，需另立契约（内容哈希或显式 `mode` 参数）。
+- **`PATCH /messages/{id}/speaker` 仍未接线**（沿用 T-008 集成部分遗留①）：② 页改说话人只影响页面展示，不回写 `messages.person_id`；与本次修复无关，仍待人工拍板是否补契约。
+- 沿用 T-008 验收记录中的其余遗留：`ACCEPTANCE.md` §0 提交号过期、仓库根未跟踪目录 `.workbuddy/`、pytest 临时目录回收问题、画像历史版本无 UI 选择器、`RELATIONINSIGHT_API_BASE` 未入 `.env.example`、CORS 只放行 8501、`app.on_event` 旧式钩子、S5 群聊边界、超大文本上限、并发写 `profile_versions`。
+- 未验边界：真实 DeepSeek API 端到端（401/429/超时 / `response_format` 真机效果）。
+
+### 下一步
+- **建议下一任务**：**WorkBuddy 复验必须项 5**——按生产口径重跑「导入 50 → 同意 → 分析 → **追加** 20 → 分析」，确认画像版本 v1 → **v2**、旧版本快照可读且未被改写；其余 6 个必须项与 121 例回归上轮已通过，无需重验。
+- **阻塞项**：无（原阻塞项「必须项 5 追加消息路径缺失」已具备修复证据，等待复验）。
+- **需人工确认**：① 必须项 5 复验通过后，是否走 Cursor 判定 + 产品负责人签字；② `ACCEPTANCE.md` §0 提交号与签字页更新；③ 内容级去重是否列入 v1.1；④ `.workbuddy/` 是否加进 `.gitignore`。
+- **未判验收**：本轮为**缺陷修复**，Codex 不自行判定 `ACCEPTANCE.md` 通过。
+
+---
+
 ## 修订记录
 
 | 版本 | 日期 | 说明 |
@@ -722,3 +948,5 @@ backend\.venv\Scripts\python.exe -m pytest tests -q
 | 0.6 | 2026-09-22 | 追加 T-006 交接记录；T-006 轮拍板同步进 ARCHITECTURE.md（§6 余数批「原地长大」维持现状 + UI 顶部常显当前覆盖消息数与最新画像版本号）、TASKS.md（T-005 遗留问题标「已确认」、T-006 状态改「完成」、修订记录 0.7） |
 | 0.7 | 2026-09-22 | 追加 T-007 交接记录；T-007 轮拍板同步进 `ARCHITECTURE.md`（§7 删除范围＝「按会话删除为主」+ 设置页「清空全部本地数据」危险操作与二次确认；§4.7 同意文案严格按 `PRIVACY.md` §1.3 落地、不自行发挥）；`TASKS.md` T-007 状态改「完成」并补实现记录与遗留问题、修订记录 0.8 |
 | 0.8 | 2026-09-22 | 追加 T-008（集成部分）交接记录：`backend/main.py` 新增 `messages:import` / `profile` 接口与 CORS(8501)、`frontend/app.py` 改读真实画像并接线导入与刷新、端到端自测（真实 uvicorn + 真实 Streamlit 页面 + `FakeDeepSeekClient`，零真实 API）；`TASKS.md` T-008 状态改「集成完成，待 WorkBuddy 验收」、T-007 遗留问题 ①② 标「已确认」、未成年人标准 / DeepSeek URL / 口令移入 v1.1、修订记录 0.9；**未判 `ACCEPTANCE.md` 通过** |
+| 0.9 | 2026-09-22 | 追加 **T-008 最终验收**记录（WorkBuddy 执行）：7 个必须项 **6 通过 / 1 失败**；发现「同一会话无法追加消息 → 必须项 5 阻断」（`/messages:import` 409 `duplicate_message_id`，根因 `parse_chat` 的 `seq` 恒从 0 起 + §6 方案 A 拒绝整批），建议交回 Codex 修；`pytest tests -q` → 121 passed；生产库经清理后 7 表 0 行且 SHA-256 全程未变；未生成 `deletion_audit.jsonl`；**未代签、不自行宣布 MVP 达标**，交人工拍板 |
+| 1.0 | 2026-09-23 | 追加 **T-008 缺陷修复**交接记录（Codex）：必须项 5 根因＝`parse_chat()` 的 `seq` 恒从 0 起 → 追加导入必冲突 → 方案 A 拒绝整批；修法＝`parse_chat` / `import_chat` 新增 `seq_offset`，`import_messages()` 写库前取 `MAX(seq)+1`（先偏移后检测冲突，算法与方案 A 语义不变）；`ARCHITECTURE.md` §6 补冻结「追加导入自动续号」、`TASKS.md` T-002 补 `seq` 语义且 T-008 状态改「修复完成，待 WorkBuddy 复验必须项 5」；新增 `tests/test_import_append.py` + `tests/test_parser.py` 2 例 → `pytest tests -q` **125 passed**，真实 HTTP 冒烟验证 50 → v1 → 追加 20 → v2；生产库仍 7 表 0 行；**未判验收** |

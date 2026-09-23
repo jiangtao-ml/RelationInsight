@@ -55,6 +55,14 @@ NORMAL_BODIES = [
     "好吧，那周六下午两点，老地方见。",
 ]
 
+def _bulk_text(count: int, *, start: int = 0) -> str:
+    """生成 count 行合法的 `A: …` / `B: …` 文本；`start` 只影响正文编号，便于肉眼核对。"""
+    return "\n".join(
+        f"{'A' if (start + index) % 2 == 0 else 'B'}: 第{start + index + 1}条消息"
+        for index in range(count)
+    )
+
+
 ERROR_TEXT = "\n".join(
     [
         "A: 第一条正常",
@@ -137,6 +145,11 @@ def test_parse_chat_rejects_bad_arguments() -> None:
         parse_chat("A: 你好", "")
     with pytest.raises(ValueError):
         make_person_id(CONVERSATION_ID, "C")
+    # seq_offset 早失败：非 int / 负数都不许悄悄写成序号 0（§6 追加导入自动续号）
+    with pytest.raises(TypeError):
+        parse_chat("A: 你好", CONVERSATION_ID, seq_offset="50")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        parse_chat("A: 你好", CONVERSATION_ID, seq_offset=-1)
 
 
 def test_make_message_id_is_deterministic_and_conversation_scoped() -> None:
@@ -280,3 +293,53 @@ def test_insert_messages_with_empty_batch_is_a_noop(db_path: Path) -> None:
     assert report.status == STATUS_NOTHING_TO_IMPORT
     assert report.inserted_count == 0
     assert not db_path.exists()
+
+
+def test_parse_chat_with_seq_offset_continues_numbering() -> None:
+    """T-008 缺陷修复（§6 2026-09-23）：seq_offset=50 → seq 从 50 起，message_id 不与 seq 0-49 冲突。"""
+    text = "\n".join(f"{'A' if index % 2 == 0 else 'B'}: 第{index + 1}条消息" for index in range(20))
+
+    result = parse_chat(text, CONVERSATION_ID, seq_offset=50)
+
+    assert result.errors == []
+    assert [m.seq for m in result.messages] == list(range(50, 70))
+    assert [m.source_line for m in result.messages] == list(range(1, 21))
+    assert result.messages[0].message_id == make_message_id(CONVERSATION_ID, 50)
+    assert result.messages[-1].message_id == make_message_id(CONVERSATION_ID, 69)
+    # 与「首段文本 seq 0-49」的 ID 完全不重合：这正是旧实现必然冲突的原因
+    first_segment_ids = {make_message_id(CONVERSATION_ID, seq) for seq in range(50)}
+    assert first_segment_ids.isdisjoint({m.message_id for m in result.messages})
+
+
+def test_appended_import_continues_seq_and_write_succeeds(db_path: Path) -> None:
+    """T-008 缺陷修复：先导入 50 条，再以 seq_offset=50 追加 20 条 → 两次都成功，库内共 70 条。"""
+    first = import_chat(_bulk_text(50), CONVERSATION_ID, db_path=db_path)
+    assert first.status == STATUS_INSERTED
+    assert first.inserted_count == 50
+    assert first.messages[-1].seq == 49
+
+    appended = import_chat(_bulk_text(20, start=50), CONVERSATION_ID, seq_offset=50, db_path=db_path)
+
+    assert appended.status == STATUS_INSERTED
+    assert appended.rejected is False
+    assert appended.inserted_count == 20
+    assert appended.conflicts == []
+    assert [m.seq for m in appended.messages] == list(range(50, 70))
+
+    conn = sqlite3.connect(db_path)
+    try:
+        seqs = [row[0] for row in conn.execute("SELECT seq FROM messages ORDER BY seq")]
+        ids = [row[0] for row in conn.execute("SELECT message_id FROM messages ORDER BY seq")]
+    finally:
+        conn.close()
+    assert seqs == list(range(70))
+    assert len(set(ids)) == 70
+    assert _count_rows(db_path, "messages") == 70
+    assert _count_rows(db_path, "persons") == 2  # 同一会话的 A/B 不重复建行
+
+    # 不带 seq_offset（旧行为）时，同一段追加文本仍会被「拒绝整批」——证明修复点在续号而不在冲突策略
+    naive = import_chat(_bulk_text(20, start=50), CONVERSATION_ID, db_path=db_path)
+    assert naive.status == STATUS_REJECTED_CONFLICT
+    assert naive.inserted_count == 0
+    assert len(naive.conflicts) == 20
+    assert _count_rows(db_path, "messages") == 70

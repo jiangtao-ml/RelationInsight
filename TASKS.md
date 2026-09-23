@@ -26,7 +26,7 @@
 | T-005 | 长期画像增量更新（新证据不覆盖旧结论，保留版本） | Codex · Cursor（合并规则） | 历史 `profile_versions` + 新批次分析 | 新版本画像；旧版本只读保留 | T-004 | 见下方 T-005 | 完成 |
 | T-006 | Streamlit 前端原型（模拟数据：导入、A/B 标记、画像卡片、证据列表） | Codex · Cursor（信息架构）· WorkBuddy（界面点验） | 模拟 JSON；UI 线框文字 | `app.py`（或 `frontend/`）可演示四块界面 | 无（可与后端并行） | 见下方 T-006 | 完成 |
 | T-007 | 一键删除与同意记录功能 | Codex · Cursor（隐私条款落地） | `PRIVACY.md`；会话/人物 ID | 同意写入；删除 API + UI；残留检查脚本 | T-001, T-006 | 见下方 T-007 | 完成 |
-| T-008 | 集成与验收 | Cursor（主导）· Codex（修缺陷）· WorkBuddy（按清单执行） | `ACCEPTANCE.md`；已实现 T-001–T-007 | 验收记录；已知问题列表；是否达标结论 | T-001–T-007 | 见下方 T-008 | 集成完成，待 WorkBuddy 验收 |
+| T-008 | 集成与验收 | Cursor（主导）· Codex（修缺陷）· WorkBuddy（按清单执行） | `ACCEPTANCE.md`；已实现 T-001–T-007 | 验收记录；已知问题列表；是否达标结论 | T-001–T-007 | 见下方 T-008 | 修复完成，待 WorkBuddy 复验必须项 5 |
 
 ---
 
@@ -53,12 +53,14 @@
 | 输入 | 纯文本；格式规格（v0.1 已冻结） |
 | 输出 | `parse_chat(text) -> list[MessageDTO]`；无法解析行的列表；将结果写入 `messages` 的服务函数 |
 | 依赖 | T-001 |
-| 验收标准 | ① 每条成功消息有全局唯一 `message_id`，用已冻结算法 `uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`（`seq` 从 0 起）；② 说话人仅为 `A` 或 `B`（或绑定 `person_id`）；③ `body` 为原文完整保留；④ 空行可跳过并计数；非 `A:`/`B:` 行记入错误列表；⑤ 至少 2 个夹具样例测试通过 |
+| 验收标准 | ① 每条成功消息有全局唯一 `message_id`，用已冻结算法 `uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`（`seq` 为**会话内全局序号**：首段从 0 起，追加导入按 `seq_offset` 续号，见 §6）；② 说话人仅为 `A` 或 `B`（或绑定 `person_id`）；③ `body` 为原文完整保留；④ 空行可跳过并计数；非 `A:`/`B:` 行记入错误列表；⑤ 至少 2 个夹具样例测试通过 |
 | 当前状态 | 完成 |
 
 **已确认（v0.1）：** 第一版**只**支持行格式 `A: 正文` 与 `B: 正文`。不支持时间前缀、微信/QQ 导出。A/B 大小写 **假设** 仅接受大写 A/B（实现时写进测试）。
 
 **已确认（2026-09-22 冻结）`message_id` 算法：** `message_id = uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`，`seq` 从 **0** 开始、按导入顺序递增；同一 `(conversation_id, seq)` 必得同一 ID。**重复导入策略：拒绝整批**——写库前先做全批存在性检查，只要有一个 `message_id` 已存在，整批不写入，并在错误报告中列出冲突 ID 与来源行号（不做部分导入、不静默跳过）。完整约定见 `ARCHITECTURE.md` §6。
+
+**已确认（2026-09-23 补冻结，T-008 必须项 5 缺陷修复）`seq` 语义：** `seq` 是**会话内的全局序号**（不是「本段文本内的序号」）——`parse_chat(text, conversation_id, *, seq_offset=0)` 与 `import_chat(text, conversation_id, *, seq_offset=0, ...)` 接受 `seq_offset` 作为起点；导入端写库前取该会话 `SELECT COALESCE(MAX(seq), -1) + 1` 作为 `seq_offset`，从而实现**追加导入自动续号**。`message_id` 算法与「重复导入拒绝整批」语义**均不变**，只是把冲突检测放在**偏移之后**；同一段文本原样再导入不再报冲突（内容级去重留 v1.1）。完整约定见 `ARCHITECTURE.md` §6。
 
 **已确认（2026-09-22 拍板）：** ① `person_id` = `uuid5(NAMESPACE_URL, f"person:{conversation_id}:{role}")`，已冻结并写入 `ARCHITECTURE.md` §4.1；② 文本中含解析错误行时，**仍导入可解析成功的行**并在报告中列出错误（含行号与原因）。该策略与「`message_id` 冲突则拒绝整批」是**两条不同规则**，见 `ARCHITECTURE.md` §6。
 
@@ -173,15 +175,17 @@
 | 输出 | 填写完成的验收清单；缺陷票；演示路径说明 |
 | 依赖 | T-001–T-007 |
 | 验收标准 | `ACCEPTANCE.md` 全部「必须」项通过；未通过项有明确豁免签字（**需人工确认**）才可标 MVP 完成 |
-| 当前状态 | 集成完成，待 WorkBuddy 验收 |
+| 当前状态 | 修复完成，待 WorkBuddy 复验必须项 5 |
 
 **实现记录（2026-09-22，集成部分）：** `backend/main.py` 新增 **`POST /conversations/{id}/messages:import`**（纯文本 → T-002 `import_chat` → 写 `messages`；需要时用 `INSERT OR IGNORE` 补 `conversations` 主行；重复导入按 §6 已冻结的**方案 A 拒绝整批** → `409 duplicate_message_id` + `detail.conflicts` 列出冲突 `message_id` 与来源行号；响应体**不含原文**，解析错误只回「行号 + 原因」）与 **`GET /conversations/{id}/profile`**（读 T-005 快照：默认最新版、`?version=N` 读历史版、**只读**；无画像 → `404 no_profile`，前端据此回退离线 fixture）；`FastAPI(version="0.8.0")` 加 **CORS**，只放行本机 Streamlit 原型 `http://localhost:8501` / `http://127.0.0.1:8501`（`ARCHITECTURE.md` §8：服务仍只绑 `127.0.0.1`）。`frontend/app.py`：画像卡片由 `mock_profile.json` 改为**优先**调 `GET /conversations/{id}/profile`（离线/失败才回退 fixture 并显示失败原因），新增「导入到数据库」按钮（调 `messages:import`，展示写入条数 / seq 区间 / 错误行表 / 冲突表）与「刷新画像」按钮，并在导入 / 分析 / 删除后自动失效画像缓存；同意勾选与「删除本会话」沿用 T-007 接线（本轮确认可用）。**未改动 T-001–T-007 任何已冻结接口契约**；未新增依赖、未新增测试文件；`backend/data/relationinsight.db` 仍 7 张表 0 行。
 
 **端到端自测（2026-09-22，全部离线，真实 HTTP + 真实页面）：** 真实 `uvicorn`（`127.0.0.1:8011`，注入临时库 + `FakeDeepSeekClient`）+ 真实 Streamlit 页面（`streamlit.testing.v1.AppTest`）走通：未同意分析 → `403 no_consent` → 导入 63 条（seq 0–62、错误行 4、空行 3）→ 勾选同意写 `consents` → 分析合并（2 批 / `analyses` 2 / `evidence` 12 / `profile_versions` v1）→ 前端读真实画像（v1、63 条、`A.request_style` 与 `B.request_style` 各 1 条）→ 二次确认删除（七表该会话计数 0、全库 0、`db`/`-wal` 字节级残留 0 命中、审计 1 行且无原文）。另用记录型 Fake 客户端验证**调用模型前脱敏**：63 条中含 PII 的 seq 28/30/44 原文只留本机 `messages.body`，实际发往模型的文本 PII 命中全为 False 且出现 `[手机号]` / `[邮箱]` / `[银行卡号]` 占位符，入库 `evidence.quote` 同样无 PII。复跑 `pytest tests -q` → **`121 passed`**（无回归）。自测脚本为临时文件，跑完即删。
 
-**遗留问题（2026-09-22，T-008 集成部分）：** ① `PATCH /messages/{id}/speaker` **未接线**——② A/B 标记页的「改说话人」目前只影响页面展示，不回写 `messages.person_id`（T-002/T-007 未定义该接口，T-008 不新增契约；若验收要求「改完重算生效」需先补契约）；② 前端暂无画像历史版本选择器（API 侧 `?version=N` 已支持）；③ `RELATIONINSIGHT_API_BASE` 未写入 `.env.example`；④ 换端口起 Streamlit 需改 `main.py` 的 `ALLOWED_ORIGINS`；⑤ 画像缓存在 `st.session_state`，跨端改动后需点「刷新画像」；⑥ 删除审计记 `scope`（会话 ID）以支持追溯（非原文）。
+**遗留问题（2026-09-22，T-008 集成部分）：** ① `PATCH /messages/{id}/speaker` **未接线**——② A/B 标记页的「改说话人」目前只影响页面展示，不回写 `messages.person_id`（T-002/T-007 未定义该接口，T-008 不新增契约；若验收要求「改完重算生效」需先补契约）；② 前端暂无画像历史版本选择器（API 侧 `?version=N` 已支持）；③ `RELATIONINSIGHT_API_BASE` 未写入 `.env.example`；④ 换端口起 Streamlit 需改 `main.py` 的 `ALLOWED_ORIGINS`；⑤ 画像缓存在 `st.session_state`，跨端改动后需点「刷新画像」；⑥ 删除审计记 `scope`（会话 ID）以支持追溯（非原文）；⑦ 续号修复后**同一段文本原样再导入不再报 409**，而是续号追加（内容重复但 `seq` 合法）——**内容级去重属 v1.1**，MVP 不做。
 
-**未判验收：** 本任务只完成集成与端到端自测；`ACCEPTANCE.md` 全部「必须」项的结论与豁免签字由 **WorkBuddy / Cursor** 出具，Codex 不自行判定通过。
+**实现记录（2026-09-23，缺陷修复：必须项 5「追加消息后画像版本 +1」）：** WorkBuddy 最终验收 7 个必须项 6 通过 / 1 失败，唯一失败项即必须项 5，根因＝`parser.parse_chat()` 的 `seq` **恒从 0 起** → 追加导入时 `message_id` 必然与既有行冲突 → 触发 §6 方案 A「拒绝整批」→ 产品路径上无法追加。修法（**不改算法、不改方案 A 语义**）：① `backend/parser.py` 的 `parse_chat()` / `import_chat()` 新增 `seq_offset`（默认 0），`seq` 从 `seq_offset` 起递增，并对非 int / 负数早失败；② `backend/main.py::import_messages()` 写库前执行 `SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE conversation_id = ?`，把结果作为 `seq_offset` 传入，**先偏移、后检测冲突**——只有偏移后**仍**冲突才按方案 A 返回 `409`；空会话时 `seq_offset = 0`，首版行为不变。测试：新增 `tests/test_import_append.py`（2 例离线端到端：50+20 续号后画像 v1→v2 且 v1 快照未被改写；显式压回 `seq_offset=0` 时仍拒绝整批）与 `tests/test_parser.py` 2 例（`seq_offset=50` 续号且 ID 与 0–49 不重合、50+20 追加写库共 70 条），并在既有参数校验用例补 `seq_offset` 断言；`pytest tests -q` → **`125 passed`**（集成时 121 + 新增 4，零回归）。真实 HTTP 冒烟（`uvicorn 127.0.0.1:8012` + 临时库 + `FakeDeepSeekClient`，零真实 API）：导入 50（seq 0–49）→ 同意 → 分析 v1（`analyses` 1 / `evidence` 6）→ **追加导入 20 → HTTP 200、seq 50–69、conflicts 0**（旧实现此处 409）→ 再分析 → 画像 **v2**（`batch_count=2` / `analyses_written=1` / `message_count=70`）、`analyses` 2 / `evidence` 12 / `profile_versions` 2，v1 快照 sha256 前后一致；生产库 `backend/data/relationinsight.db` 仍 7 张表 0 行。
+
+**未判验收：** 本任务只完成集成与端到端自测；`ACCEPTANCE.md` 全部「必须」项的结论与豁免签字由 **WorkBuddy / Cursor** 出具，Codex 不自行判定通过。**2026-09-23 的缺陷修复同样不自行判验收**：必须项 5 需由 WorkBuddy 重跑产品路径复验。
 
 ---
 
@@ -213,3 +217,4 @@ WorkBuddy 在 T-001、T-006、T-007、T-008 必须参与运行验证。
 | 0.7 | 2026-09-22 | T-006 完成（总表与明细状态改「完成」并补实现记录）；T-005 遗留问题标「已确认」：`quote` 截断 80 字符维持现状、`profile_versions` 并发不加锁；拍板落地：余数批「原地长大」维持现状并在 UI 顶部提示（见 `ARCHITECTURE.md` §6） |
 | 0.8 | 2026-09-22 | T-007 完成（总表与明细「当前状态」改「完成」并补实现记录与遗留问题）；T-007 明细「输入」「假设」中的待确认项据 2026-09-22 拍板改为「已确认」；拍板落地：删除范围以「按会话删除」为主 + 设置页「清空全部本地数据」危险操作与二次确认、同意文案严格按 `PRIVACY.md` §1.3 落地、不自行发挥（见 `ARCHITECTURE.md` §7 / §4.7） |
 | 0.9 | 2026-09-22 | T-008 **集成部分**完成（总表与明细「当前状态」改「集成完成，待 WorkBuddy 验收」并补实现记录 / 端到端自测结果 / 遗留问题）；T-007 遗留问题 ①② 标「已确认（2026-09-22）维持现状」、未成年人标准与 DeepSeek URL 与口令三项移入 v1.1 遗留；落地：`backend/main.py` 新增 `messages:import` 与 `profile` 接口 + CORS(8501)，`frontend/app.py` 改读真实画像并接线导入 / 刷新。**未判 `ACCEPTANCE.md` 通过** |
+| 1.0 | 2026-09-23 | **T-008 缺陷修复**（必须项 5「追加消息后画像版本 +1」）：`ARCHITECTURE.md` §6 补冻结「追加导入自动续号」；`parser.parse_chat()` / `import_chat()` 新增 `seq_offset`，`backend/main.py::import_messages()` 写库前取 `MAX(seq)+1` 实现续号（先偏移后检测冲突，方案 A 语义不变）；T-002 补 `seq` 语义；新增 `tests/test_import_append.py` + `tests/test_parser.py` 2 例 → `125 passed`。T-008 状态改「修复完成，待 WorkBuddy 复验必须项 5」 |

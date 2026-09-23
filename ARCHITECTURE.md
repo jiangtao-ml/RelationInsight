@@ -324,7 +324,8 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 ```
 
 - `conversation_id`：会话标识字符串；参与拼接时不做任何规范化（不 `strip`、不改大小写）。
-- `seq`：本会话内的导入顺序，**从 0 开始**、按导入顺序递增（整数）。
+- `seq`：**会话内的全局序号**（不是「本段文本内的序号」）：从 0 开始、按导入顺序递增（整数）。
+  追加导入时 `seq` 的起点由导入端给出，见下方「追加导入自动续号」。
 - 同一 `(conversation_id, seq)` 必须永远得到同一 `message_id`：算法可复现，不含随机成分。
 - 原「方案 B（sha256 截断）」**废弃**，不得实现。
 
@@ -333,6 +334,27 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 - 写入 `messages` 前先对全批 `message_id` 做存在性检查；只要有一个已存在，**整批不写入**（不做部分导入、不做静默跳过）。
 - 冲突必须在错误报告中列出冲突的 `message_id` 及其来源行号，供使用者改 `conversation_id` 或另起会话。
 - 同一 `conversation_id` 下 `seq` 唯一，故 `seq` 冲突与 `message_id` 冲突等价。
+
+**追加导入自动续号（2026-09-23 补冻结；T-008 必须项 5 缺陷修复）。**
+
+- `message_id` 算法**不变**（仍是上面的方案 A）。改的是 `seq` 的**语义**：`seq` 是「会话内的全局序号」，
+  不再是「本段文本内的序号」。
+- 导入端写库前先取偏移量：
+
+  ```sql
+  SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE conversation_id = ?
+  ```
+
+  并以该值（`seq_offset`）作为本批 `seq` 的起点。空会话 / 首次导入时 `seq_offset = 0`，
+  与首版行为**完全一致**；**追加**导入时自然续号（如已有 seq 0–49，则新批从 50 起），
+  不再与既有 `message_id` 相撞。
+- **冲突检测只在「偏移后仍冲突」时才触发**：偏移后仍撞上既有行（外部写入、显式指定了错误起点等）
+  → 仍按方案 A **拒绝整批**并列出冲突 `message_id` 与来源行号。**方案 A 的语义不变。**
+- 已知且接受的推论：把**同一段文本**原样再导入一次，不再报 `409`，而是被当作新消息续号追加
+  （内容重复但 `seq` 合法）。**内容级去重不在 MVP 范围内**，列入 v1.1 遗留。
+- 实现落点：`parser.parse_chat(text, conversation_id, *, seq_offset=0)`、
+  `parser.import_chat(text, conversation_id, *, seq_offset=0, ...)`；`backend/main.py::import_messages()`
+  负责读取 `seq_offset` 并保持「先偏移、后检测冲突」的顺序。
 
 **已冻结（2026-09-22）：** `person_id` = `uuid5(NAMESPACE_URL, f"person:{conversation_id}:{role}")`（见 §4.1）；`conversations` 表创建（见 §4.2）。
 
@@ -413,3 +435,4 @@ message_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{conversation_id}:{seq}"))
 | 0.4 | 2026-09-22 | T-005 轮拍板冻结：§4.5 取消「需人工确认」——`speaker_role` 对 `dyad.*` 恒记真实说话人；§6 批次幂等键 = `batch_index`、追加消息后不重算既有批次、只分析新增尾批；§8 证据不合法保持「降级为丢弃 + 记录」 |
 | 0.5 | 2026-09-22 | T-006 轮拍板：余数批「原地长大」维持现状；新增 UI 约定——前端顶部常显当前覆盖消息数与最新画像版本号（§6） |
 | 0.6 | 2026-09-22 | T-007 轮拍板：① 删除以「按会话删除」为主，「清空全部本地数据」为设置页危险操作 + 二次确认（§0 / §7）；② 同意文案严格按 `PRIVACY.md` §1.3 落地、不自行发挥（§0 / §4.7）；补 T-007 实现约定（删除顺序、二次确认参数、`VACUUM`、残留检查、无原文回执、同意闸门） |
+| 0.7 | 2026-09-23 | **§6 补冻结「追加导入自动续号」**（T-008 必须项 5 缺陷修复）：`message_id` 算法与「重复导入拒绝整批」语义均不变，仅把 `seq` 语义明确为**会话内全局序号**，导入端取 `MAX(seq)+1` 作为起点、先偏移后检测冲突；同一段文本原样再导入不再报冲突（内容级去重留 v1.1） |

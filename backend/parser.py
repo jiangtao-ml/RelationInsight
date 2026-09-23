@@ -4,8 +4,10 @@
 --------
 - `ARCHITECTURE.md` §0（v0.1 冻结）：第一版**仅**支持 `A: 正文` 与 `B: 正文`；不支持时间前缀、
   微信/QQ 导出。`A`/`B` 仅接受**大写**。
-- `ARCHITECTURE.md` §6（2026-09-22 冻结，方案 A）：
-  `message_id = uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`，`seq` 从 0 开始按导入顺序递增。
+- `ARCHITECTURE.md` §6（2026-09-22 冻结方案 A；2026-09-23 补冻结「追加导入自动续号」）：
+  `message_id = uuid5(NAMESPACE_URL, f"{conversation_id}:{seq}")`；`seq` 是**会话内的全局序号**
+  （不是「本段文本内的序号」），起点由调用方通过 `seq_offset` 给出（导入端取库内 `MAX(seq)+1`），
+  新批次据此续号，使「同一会话追加消息」不再因 `message_id` 冲突被「拒绝整批」。
   重复导入策略 = **拒绝整批**：写库前对全批 `message_id` 做存在性检查，只要有一个已存在就整批
   不写入，并在报告中列出冲突 ID 与来源行号（不做部分导入、不静默跳过）。
 
@@ -138,20 +140,27 @@ def make_person_id(conversation_id: str, role: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"person:{conversation_id}:{role}"))
 
 
-def parse_chat(text: str, conversation_id: str) -> ParseResult:
+def parse_chat(text: str, conversation_id: str, *, seq_offset: int = 0) -> ParseResult:
     """把整段聊天文本解析成 MessageDTO 列表 + 错误行列表。
 
     - 空行（含仅空白行）跳过并计数，不产生消息、不产生错误。
-    - `seq` 只对**成功解析**的行递增，从 0 开始。
-    - 非文本类型/`None` 输入抛 TypeError（早失败，避免静默丢数据）。
+    - `seq` 只对**成功解析**的行递增，**从 `seq_offset` 开始**（默认 0，首版行为不变）。
+    - `seq_offset` = 会话内全局序号的起点：追加导入时由调用方传入库内 `MAX(seq)+1`
+      （`ARCHITECTURE.md` §6「追加导入自动续号」），使新批次与既有 `message_id` 不冲突。
+    - 非文本类型/`None` 输入抛 TypeError；`seq_offset` 非 int 或为负抛 TypeError / ValueError
+      （早失败，避免静默丢数据或写坏序号）。
     """
     if not isinstance(text, str):
         raise TypeError("text 必须是 str")
     if not isinstance(conversation_id, str) or not conversation_id:
         raise ValueError("conversation_id 必须是非空 str")
+    if isinstance(seq_offset, bool) or not isinstance(seq_offset, int):
+        raise TypeError("seq_offset 必须是 int")
+    if seq_offset < 0:
+        raise ValueError("seq_offset 必须 >= 0")
 
     result = ParseResult()
-    seq = 0
+    seq = seq_offset
 
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         if not raw_line.strip():
@@ -188,11 +197,12 @@ def parse_chat(text: str, conversation_id: str) -> ParseResult:
         seq += 1
 
     logger.info(
-        "parse_chat: conversation=%s parsed=%d errors=%d blank_skipped=%d",
+        "parse_chat: conversation=%s parsed=%d errors=%d blank_skipped=%d seq_offset=%d",
         conversation_id,
         len(result.messages),
         len(result.errors),
         result.blank_lines_skipped,
+        seq_offset,
     )
     return result
 
@@ -307,14 +317,17 @@ def insert_messages(
 
 
 def import_chat(
-    text: str, conversation_id: str, *, connection=None, db_path=None
+    text: str, conversation_id: str, *, seq_offset: int = 0, connection=None, db_path=None
 ) -> ImportReport:
     """解析 + 写入的一站式 service 函数（调用方通常只需要这个）。
 
     返回的 `ImportReport` 同时携带：写入结果（`status` / `inserted_count` / `conflicts`）、
     解析错误（`errors`）、跳过空行数（`blank_lines_skipped`）与解析出的 `messages`。
+
+    `seq_offset`：会话内全局序号的起点（默认 0）。**追加导入**时必须传入库内 `MAX(seq)+1`，
+    否则新批次的 `message_id` 会与既有行冲突并被「拒绝整批」（`ARCHITECTURE.md` §6）。
     """
-    parsed = parse_chat(text, conversation_id)
+    parsed = parse_chat(text, conversation_id, seq_offset=seq_offset)
 
     if not parsed.messages:
         logger.info("import_chat: conversation=%s 无可写入消息", conversation_id)

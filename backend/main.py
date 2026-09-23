@@ -209,7 +209,10 @@ def import_messages(conversation_id: str, payload: ImportRequest | None = Body(d
     契约（T-002 / §6 已冻结，不改动）：
     - 解析错误行**不阻断**导入：可解析的行照常写入，错误行按「行号 + 原因」返回（**不回显原文**）；
     - `message_id` 冲突（重复导入）→ **拒绝整批**：整批一行都不写，返回 `409 duplicate_message_id`，
-      并在 `detail.conflicts` 里列出冲突 ID 与来源行号。
+      并在 `detail.conflicts` 里列出冲突 ID 与来源行号；
+    - **追加导入自动续号**（2026-09-23 补冻结，§6）：写库前取该会话库内 `MAX(seq)+1` 作为
+      `seq_offset`；`seq` 是会话内**全局**序号，故「补充粘贴新消息」不再与既有行冲突，
+      只有偏移后**仍**冲突时才按方案 A 拒绝整批。
     """
     from parser import STATUS_REJECTED_CONFLICT, import_chat
 
@@ -231,7 +234,15 @@ def import_messages(conversation_id: str, payload: ImportRequest | None = Body(d
     init_db(db_path)  # 幂等：表不存在时先建
     conn = get_connection(db_path)
     try:
-        report = import_chat(text, conversation_id, connection=conn)
+        # T-008 缺陷修复（2026-09-23，§6「追加导入自动续号」）：seq 是**会话内全局序号**，新批次的
+        # 起点 = 该会话库内 MAX(seq)+1；空会话时 COALESCE(...,-1)+1 = 0，与首版行为一致。
+        # 先偏移再检测冲突，故只有「偏移后仍冲突」才按方案 A 拒绝整批。
+        cursor = conn.execute(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        seq_offset = int(cursor.fetchone()[0])
+        report = import_chat(text, conversation_id, seq_offset=seq_offset, connection=conn)
         if report.status == STATUS_REJECTED_CONFLICT:
             conflicts = [
                 {"message_id": conflict.message_id, "source_line": conflict.source_line}
@@ -271,11 +282,12 @@ def import_messages(conversation_id: str, payload: ImportRequest | None = Body(d
         message = "没有可写入的消息：请检查格式是否为 `A: 正文` / `B: 正文`"
 
     logger.info(
-        "import: conversation=%s inserted=%d errors=%d blank_skipped=%d",
+        "import: conversation=%s inserted=%d errors=%d blank_skipped=%d seq_offset=%d",
         conversation_id,
         report.inserted_count,
         len(errors),
         report.blank_lines_skipped,
+        seq_offset,
     )
     return {
         "conversation_id": conversation_id,
